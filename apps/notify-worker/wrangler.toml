@@ -1,0 +1,10 @@
+name = "notify-worker"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+MAIL_FROM = "no-reply@example.com"
+MAIL_FROM_NAME = "SaleAgent"
+MAIL_DOMAIN = "example.com"
+NOTIFY_TOKEN = "change-me"
+
