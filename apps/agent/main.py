@@ -33,9 +33,11 @@ app.add_middleware(
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
-EMBED_BASE = os.getenv("EMBEDDING_API_BASE", os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"))
+# OpenRouter 配置（统一管理不同模型服务商）
+EMBED_BASE = os.getenv("EMBEDDING_API_BASE", os.getenv("LLM_BASE_URL", "https://openrouter.ai/api/v1"))
 EMBED_KEY = os.getenv("EMBEDDING_API_KEY", os.getenv("LLM_API_KEY"))
-EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small")
+EMBED_REFERER = os.getenv("EMBEDDING_REFERER", os.getenv("SITE_URL", "https://saleagent.app"))
 CF_WORKER_NOTIFY_URL = os.getenv("CF_WORKER_NOTIFY_URL")
 CF_NOTIFY_TOKEN = os.getenv("CF_NOTIFY_TOKEN")
 
@@ -337,10 +339,20 @@ async def _get_embedding(text: str) -> list[float] | None:
     if not (EMBED_BASE and EMBED_KEY and text):
         return None
     try:
+        # 构建请求头，支持 OpenRouter
+        headers = {
+            "Authorization": f"Bearer {EMBED_KEY}",
+            "Content-Type": "application/json",
+        }
+        # OpenRouter 需要 HTTP-Referer header
+        if "openrouter.ai" in EMBED_BASE:
+            headers["HTTP-Referer"] = EMBED_REFERER
+            headers["X-Title"] = "SaleAgent"
+        
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
                 f"{EMBED_BASE}/embeddings",
-                headers={"Authorization": f"Bearer {EMBED_KEY}"},
+                headers=headers,
                 json={"input": text, "model": EMBED_MODEL},
             )
             r.raise_for_status()

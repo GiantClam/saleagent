@@ -107,10 +107,11 @@ saleagent/
    SUPABASE_ANON_KEY=eyJ...
    CORS_ORIGIN=https://your-app.vercel.app
    
-   # 可选：向量检索
-   EMBEDDING_API_BASE=https://api.openai.com/v1
-   EMBEDDING_API_KEY=sk-...
-   EMBEDDING_MODEL=text-embedding-3-small
+   # 可选：向量检索（使用 OpenRouter 统一管理不同模型服务商）
+   EMBEDDING_API_BASE=https://openrouter.ai/api/v1
+   EMBEDDING_API_KEY=sk-or-v1-...  # OpenRouter API Key
+   EMBEDDING_MODEL=openai/text-embedding-3-small  # 或使用其他模型，如: nomic-ai/nomic-embed-text-v1.5
+   EMBEDDING_REFERER=https://your-app.vercel.app  # OpenRouter 需要，用于标识应用来源
    
    # Cloudflare Worker 通知
    CF_WORKER_NOTIFY_URL=https://notify-worker.xxx.workers.dev
