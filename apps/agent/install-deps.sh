@@ -25,8 +25,12 @@ pip install $PIP_INDEX boto3==1.34.153
 echo "3️⃣ 安装 Supabase..."
 pip install $PIP_INDEX supabase==2.5.1
 
+# 安装 nest-asyncio（用于处理嵌套事件循环）
+echo "4️⃣ 安装 nest-asyncio..."
+pip install $PIP_INDEX nest-asyncio==1.6.0
+
 # 最后安装 CrewAI（使用 legacy resolver 避免依赖解析问题）
-echo "4️⃣ 安装 CrewAI（这可能需要一些时间）..."
+echo "5️⃣ 安装 CrewAI（这可能需要一些时间）..."
 pip install $PIP_INDEX --use-deprecated=legacy-resolver crewai==1.4.0
 
 echo "✅ 所有依赖安装完成！"

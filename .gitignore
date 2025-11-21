@@ -252,3 +252,36 @@ logs/
 # 本地开发脚本生成的文件
 *.installed
 
+# ============================================
+# 敏感配置文件（确保不会被提交）
+# ============================================
+# 环境变量文件
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 配置文件中的敏感信息
+**/wrangler.toml.local
+**/railway.json.local
+**/vercel.json.local
+
+# 密钥文件
+*.pem
+*.key
+*.cert
+*.crt
+id_rsa
+id_rsa.pub
+*.p12
+*.pfx
+
+# 数据库备份
+*.sql.backup
+*.db.backup
+

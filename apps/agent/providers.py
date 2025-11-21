@@ -1,6 +1,10 @@
 import os
 import asyncio
 from typing import Protocol
+from dotenv import load_dotenv
+
+# 加载 .env 文件（确保在导入时就能读取环境变量）
+load_dotenv()
 
 
 class ImageProvider(Protocol):
@@ -24,47 +28,35 @@ class MockVideoProvider:
 
 
 def get_image_provider() -> ImageProvider:
-    """选择图片 Provider，默认 qwen_runninghub，未配置时回退 Mock。"""
+    """选择图片 Provider，默认 qwen_runninghub，未配置时抛出错误。"""
     provider = (os.getenv("PROVIDER_IMAGE") or "qwen_runninghub").lower()
     if provider == "qwen_runninghub":
-        try:
-            from .providers_image_qwen_runninghub import QwenRunningHubImageProvider
-            return QwenRunningHubImageProvider()
-        except Exception:
-            return MockImageProvider()
+        from providers_image_qwen_runninghub import QwenRunningHubImageProvider
+        # 实例化时会检查环境变量，如果未配置会抛出异常
+        return QwenRunningHubImageProvider()
     elif provider == "seedream":
-        try:
-            from .providers_image_seedream import SeedreamImageProvider
-            return SeedreamImageProvider()
-        except Exception:
-            return MockImageProvider()
+        from providers_image_seedream import SeedreamImageProvider
+        return SeedreamImageProvider()
     elif provider == "nanobanana":
-        try:
-            from .providers_image_nanobanana import NanoBananaImageProvider
-            return NanoBananaImageProvider()
-        except Exception:
-            return MockImageProvider()
-    return MockImageProvider()
+        from providers_image_nanobanana import NanoBananaImageProvider
+        return NanoBananaImageProvider()
+    raise ValueError(f"不支持的图片 Provider: {provider}")
 
 
 def get_video_provider() -> VideoProvider:
-    """选择视频 Provider，默认 pixverse，未配置时回退 Mock。"""
+    """选择视频 Provider，默认 pixverse，未配置时抛出错误。"""
     provider = (os.getenv("PROVIDER_VIDEO") or "pixverse").lower()
     if provider == "pixverse":
-        try:
-            from .providers_video_pixverse import PixVerseVideoProvider
-            return PixVerseVideoProvider()
-        except Exception:
-            return MockVideoProvider()
+        from providers_video_pixverse import PixVerseVideoProvider
+        return PixVerseVideoProvider()
     elif provider == "runninghub":
-        try:
-            from .providers_video_runninghub import RunningHubVideoProvider
-            return RunningHubVideoProvider()
-        except Exception:
-            return MockVideoProvider()
-    elif provider in {"sora2", "veo3.1", "hailuo"}:
-        # 预留占位，未来实现
-        return MockVideoProvider()
-    return MockVideoProvider()
+        from providers_video_runninghub import RunningHubVideoProvider
+        return RunningHubVideoProvider()
+    elif provider == "sora2":
+        from providers_video_runninghub_sora2 import RunningHubSora2VideoProvider
+        return RunningHubSora2VideoProvider()
+    elif provider in {"veo3.1", "hailuo"}:
+        raise ValueError(f"Provider {provider} 尚未实现")
+    raise ValueError(f"不支持的视频 Provider: {provider}")
 
 

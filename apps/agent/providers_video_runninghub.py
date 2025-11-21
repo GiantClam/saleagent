@@ -1,4 +1,5 @@
 import os
+import asyncio
 import httpx
 
 
@@ -34,9 +35,13 @@ class RunningHubVideoProvider:
         # 3) 提交任务
         async with httpx.AsyncClient(timeout=180) as client:
             submit = await client.post(
-                "https://www.runninghub.cn/api/open/v1/workflow/submitTask",
-                headers={"Content-Type": "application/json", "apiKey": api_key},
-                json={"workflowId": workflow_id, "nodeInfoList": node_info_list},
+                "https://www.runninghub.cn/task/openapi/create",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "apiKey": api_key,
+                    "workflowId": workflow_id,
+                    "nodeInfoList": node_info_list
+                },
             )
             submit.raise_for_status()
             task = submit.json().get("data", {})
@@ -50,11 +55,14 @@ class RunningHubVideoProvider:
 
             # 4) 轮询任务状态（fallback）
             video_url = None
-            for _ in range(60):  # 最长轮询约 5 分钟（按 5s/次）
+            for _ in range(120):  # 最长轮询约 10 分钟（按 5s/次，120次 * 5s = 600s = 10min）
                 status_resp = await client.post(
-                    "https://www.runninghub.cn/api/open/v1/workflow/queryTaskOutputs",
-                    headers={"Content-Type": "application/json", "apiKey": api_key},
-                    json={"taskId": task_id},
+                    "https://www.runninghub.cn/task/openapi/query",
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "apiKey": api_key,
+                        "taskId": task_id
+                    },
                 )
                 status_resp.raise_for_status()
                 data = status_resp.json().get("data")
@@ -68,7 +76,7 @@ class RunningHubVideoProvider:
                             video_url = url
                             break
                     break
-                await httpx.sleep(5)
+                await asyncio.sleep(5)
 
             if not video_url:
                 raise RuntimeError("未在超时时间内获得视频结果")

@@ -37,10 +37,25 @@ source venv/bin/activate
 if [ ! -f "venv/.installed" ]; then
     echo "📥 安装依赖..."
     pip install --upgrade pip
-    pip install -r requirements.txt
+    # 使用分步安装脚本避免依赖解析问题
+    if [ -f "install-deps.sh" ]; then
+        bash install-deps.sh
+    else
+        pip install -r requirements.txt
+    fi
     touch venv/.installed
 else
     echo "✅ 依赖已安装"
+    # 验证关键依赖是否存在
+    if ! python -c "import supabase" 2>/dev/null; then
+        echo "⚠️  检测到依赖缺失，重新安装..."
+        pip install -r requirements.txt
+    fi
+    # 验证 nest-asyncio 是否存在（新增依赖）
+    if ! python -c "import nest_asyncio" 2>/dev/null; then
+        echo "⚠️  检测到 nest-asyncio 缺失，安装中..."
+        pip install nest-asyncio==1.6.0
+    fi
 fi
 
 # 检查环境变量文件
@@ -58,5 +73,6 @@ echo ""
 echo "按 Ctrl+C 停止服务"
 echo ""
 
-uvicorn main:app --reload --port 8000
+# 使用虚拟环境中的 python 运行 uvicorn
+python -m uvicorn main:app --reload --port 8000
 

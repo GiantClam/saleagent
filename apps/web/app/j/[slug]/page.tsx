@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
+import { ShareActions } from "./ShareActions";
 
 async function getJob(slug: string) {
   const api = process.env.NEXT_PUBLIC_AGENT_URL;
@@ -46,16 +48,68 @@ export default async function JobPage({ params }: { params: { slug: string } }) 
     contentUrl: job.video_url
   };
 
+  const storyboards = job.storyboards && Array.isArray(job.storyboards) ? job.storyboards : [];
+  const hasStoryboards = storyboards.length > 0;
+
   return (
     <main style={{ maxWidth: 880, margin: "0 auto", padding: 24 }}>
       <h1 style={{ fontSize: 28, fontWeight: 700 }}>{job.slogan}</h1>
+      
+      {/* 视频信息 */}
+      {job.total_duration && (
+        <div style={{ marginTop: 12, fontSize: 14, color: "#6b7280" }}>
+          总时长: {job.total_duration.toFixed(1)}秒
+          {job.styles && job.styles.length > 0 && (
+            <span style={{ marginLeft: 16 }}>
+              风格: {job.styles.join("、")}
+            </span>
+          )}
+        </div>
+      )}
+
       <video src={job.video_url} controls style={{ width: "100%", marginTop: 16, borderRadius: 12 }} />
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <button onClick={() => navigator.clipboard.writeText(job.video_url)} style={{ padding: 8, border: "1px solid #ddd", borderRadius: 8 }}>复制视频链接</button>
-        <button onClick={() => navigator.clipboard.writeText(job.cover_url)} style={{ padding: 8, border: "1px solid #ddd", borderRadius: 8 }}>复制封面链接</button>
-        <a href={job.video_url} download style={{ padding: 8, border: "1px solid #ddd", borderRadius: 8 }}>下载 MP4</a>
-        <a href={`/?s=${encodeURIComponent(job.slogan || "")}${job.cover_url ? `&img=${encodeURIComponent(job.cover_url)}` : ""}`} style={{ padding: 8, border: "1px solid #111", borderRadius: 8, background: "#111", color: "#fff" }}>以此模板生成</a>
-      </div>
+      <Suspense fallback={<div style={{ marginTop: 12 }}>加载中...</div>}>
+        <ShareActions videoUrl={job.video_url} coverUrl={job.cover_url} slogan={job.slogan} />
+      </Suspense>
+
+      {/* 分镜信息展示 */}
+      {hasStoryboards && (
+        <div style={{ marginTop: 32, padding: 24, background: "#f9fafb", borderRadius: 12 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 20 }}>分镜脚本</h2>
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {storyboards.map((sb: any, idx: number) => (
+              <div key={idx} style={{ padding: 16, background: "white", borderRadius: 8, border: "1px solid #e5e7eb" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: "#1f2937" }}>镜头 {sb.idx || idx + 1}</span>
+                  <span style={{ fontSize: 12, color: "#6b7280" }}>
+                    {sb.begin_s?.toFixed(1) || "0.0"}s - {sb.end_s?.toFixed(1) || "0.0"}s
+                  </span>
+                </div>
+                <p style={{ fontSize: 14, color: "#374151", lineHeight: 1.6, margin: 0 }}>
+                  {sb.desc || "无描述"}
+                </p>
+                {sb.keyframes && (sb.keyframes.in || sb.keyframes.out) && (
+                  <div style={{ marginTop: 12, display: "flex", gap: 12 }}>
+                    {sb.keyframes.in && (
+                      <div>
+                        <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>首帧</div>
+                        <img src={sb.keyframes.in} alt="首帧" style={{ maxWidth: 120, borderRadius: 6, border: "1px solid #e5e7eb" }} />
+                      </div>
+                    )}
+                    {sb.keyframes.out && (
+                      <div>
+                        <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 4 }}>尾帧</div>
+                        <img src={sb.keyframes.out} alt="尾帧" style={{ maxWidth: 120, borderRadius: 6, border: "1px solid #e5e7eb" }} />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ marginTop: 20 }}>
         <div style={{ fontWeight: 600 }}>相似模板推荐</div>
         <ul>

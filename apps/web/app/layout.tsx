@@ -1,5 +1,7 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { AuthButtons } from "./components/AuthButtons";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 export const metadata: Metadata = {
   title: "AI 营销视频生成",
@@ -8,19 +10,30 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
       <body>
-        <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid #eee' }}>
-          <a href="/" style={{ fontWeight: 700 }}>SaleAgent</a>
-          <div>
-            {/* 登录/退出按钮 */}
-            <span suppressHydrationWarning={true}>
-              {/* 动态引入客户端组件避免 SSR 报错 */}
-              {typeof window !== 'undefined' && require('./components/AuthButtons') && require('./components/AuthButtons').AuthButtons ? require('./components/AuthButtons').AuthButtons() : null}
-            </span>
-          </div>
-        </header>
-        {children}
+        <ErrorBoundary>
+          <header style={{ 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center', 
+            padding: '12px 24px', 
+            borderBottom: '1px solid #e5e7eb',
+            background: 'white',
+            boxShadow: '0 1px 3px rgba(0, 0, 0, 0.05)'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
+              <a href="/" style={{ fontWeight: 700, fontSize: 18, color: '#1a1a1a' }}>SaleAgent</a>
+              <a href="/workflow" style={{ fontSize: 14, color: '#6b7280', textDecoration: 'none' }}>工作流</a>
+            </div>
+            <div>
+              <AuthButtons />
+            </div>
+          </header>
+          <ErrorBoundary>
+            {children}
+          </ErrorBoundary>
+        </ErrorBoundary>
       </body>
     </html>
   );

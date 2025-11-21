@@ -3,27 +3,49 @@ import { useEffect, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 export function AuthButtons() {
-  const supabase = (typeof window !== 'undefined' && process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
-    ? createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
-    : null as any;
+  // 使用 mounted 状态确保服务端和客户端初始渲染一致
+  const [mounted, setMounted] = useState(false);
   const [email, setEmail] = useState<string | null>(null);
+  const [supabase, setSupabase] = useState<any>(null);
 
   useEffect(() => {
-    (async () => {
-      if (!supabase) return;
-      const { data } = await supabase.auth.getUser();
-      setEmail(data.user?.email ?? null);
-    })();
+    // 标记组件已挂载（仅在客户端执行）
+    setMounted(true);
+    
+    // 初始化 Supabase 客户端（仅在客户端）
+    if (typeof window !== 'undefined' && process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+      const client = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL, 
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+      );
+      setSupabase(client);
+      
+      // 获取用户信息
+      (async () => {
+        const { data } = await client.auth.getUser();
+        setEmail(data.user?.email ?? null);
+      })();
+    }
   }, []);
 
   async function signIn(provider: 'google' | 'github') {
-    if (!supabase) return;
+    if (!supabase || typeof window === 'undefined') return;
     await supabase.auth.signInWithOAuth({ provider, options: { redirectTo: window.location.origin } });
   }
+  
   async function signOut() {
     if (!supabase) return;
     await supabase.auth.signOut();
     setEmail(null);
+  }
+
+  // 在服务端或未挂载时，显示占位内容（避免 hydration 不匹配）
+  if (!mounted) {
+    return (
+      <div style={{ display: 'flex', gap: 8, minHeight: 32 }}>
+        <div style={{ width: 100, height: 24 }} /> {/* 占位，避免布局跳动 */}
+      </div>
+    );
   }
 
   return (
