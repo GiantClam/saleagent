@@ -667,8 +667,12 @@ class SupabaseVideoTaskQueue:
     def stop(self):
         """停止 worker"""
         self._running = False
-        if self._worker_task:
-            self._worker_task.cancel()
+        if self._worker_task and not self._worker_task.done():
+            try:
+                self._worker_task.cancel()
+            except Exception:
+                # 忽略取消任务时的异常
+                pass
 
 
 # 单例

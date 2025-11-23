@@ -1,9 +1,12 @@
 import asyncio
 import os
+import logging
 from typing import Optional
 import httpx
 
 from runninghub_client import RunningHubClient, RunningHubError
+
+logger = logging.getLogger("crewai_tools")
 
 
 class RunningHubSora2VideoProvider:
@@ -65,7 +68,20 @@ class RunningHubSora2VideoProvider:
         _ = duration
 
         # 创建任务
+        logger.info(
+            f"[RunningHubSora2VideoProvider] Creating task: "
+            f"workflow_id={self.workflow_id}, "
+            f"prompt_length={len(prompt)}, "
+            f"has_image={bool(image_ref)}, "
+            f"duration={duration}, "
+            f"async_mode={async_mode}, "
+            f"node_info_list={node_info_list}"
+        )
         task_id = await self.client.create_task(self.workflow_id, node_info_list)
+        logger.info(
+            f"[RunningHubSora2VideoProvider] Task created successfully: "
+            f"task_id={task_id}, workflow_id={self.workflow_id}"
+        )
         
         # 如果异步模式，立即返回 pending 状态
         if async_mode:

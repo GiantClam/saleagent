@@ -98,6 +98,11 @@ class OpenRouterClient:
                 msg = choice.get("message") or {}
                 content = msg.get("content")
                 
+                # 检查是否有拒绝信息
+                refusal = msg.get("refusal")
+                if refusal:
+                    logger.warning(f"[OpenRouterClient] Model refused to generate content: {refusal}")
+                
                 logger.info(f"[OpenRouterClient] Content type: {type(content)}, value preview: {str(content)[:200] if content else 'None'}")
                 
                 if isinstance(content, list):
@@ -109,6 +114,12 @@ class OpenRouterClient:
                 if isinstance(content, str) and content.strip():
                     logger.info(f"[OpenRouterClient] Returning content (len={len(content)}): {content[:200]}")
                     return content.strip()
+                
+                # 检查 reasoning 字段（某些模型可能将内容放在这里）
+                reasoning = msg.get("reasoning")
+                if isinstance(reasoning, str) and reasoning.strip():
+                    logger.info(f"[OpenRouterClient] Found content in reasoning field (len={len(reasoning)}): {reasoning[:200]}")
+                    return reasoning.strip()
                 
                 # fallback: text field
                 text_field = choice.get("text")
@@ -122,12 +133,20 @@ class OpenRouterClient:
                     logger.info(f"[OpenRouterClient] Returning output_text (len={len(output_text)}): {output_text[:200]}")
                     return output_text.strip()
                 
-                # 如果所有解析都失败，打印警告并返回空字符串
+                # 如果所有解析都失败，打印详细的警告信息
                 logger.warning(f"[OpenRouterClient] No valid content found in response. Full data structure:")
                 logger.warning(f"[OpenRouterClient] data.keys(): {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
                 logger.warning(f"[OpenRouterClient] data.get('choices'): {data.get('choices')}")
                 logger.warning(f"[OpenRouterClient] choice keys: {list(choice.keys()) if isinstance(choice, dict) else 'not a dict'}")
                 logger.warning(f"[OpenRouterClient] msg keys: {list(msg.keys()) if isinstance(msg, dict) else 'not a dict'}")
+                logger.warning(f"[OpenRouterClient] msg.get('content'): {repr(msg.get('content'))}")
+                logger.warning(f"[OpenRouterClient] msg.get('refusal'): {repr(msg.get('refusal'))}")
+                logger.warning(f"[OpenRouterClient] msg.get('reasoning'): {repr(msg.get('reasoning'))}")
+                
+                # 如果模型拒绝生成，抛出更明确的错误
+                if refusal:
+                    raise OpenRouterError(f"模型拒绝生成内容: {refusal}")
+                
                 return ""
             except Exception as e:
                 # 返回原始数据以便上层记录日志

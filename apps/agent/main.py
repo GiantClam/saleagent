@@ -49,10 +49,22 @@ async def shutdown_event():
     """应用关闭时停止 Supabase 队列 worker"""
     try:
         from video_task_queue_supabase import get_supabase_queue
+        import asyncio
+        
         queue = get_supabase_queue()
         if queue:
             queue.stop()
+            # 等待 worker 任务完成取消（最多等待 2 秒）
+            if queue._worker_task and not queue._worker_task.done():
+                try:
+                    await asyncio.wait_for(queue._worker_task, timeout=2.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    # 任务被取消或超时是正常的，忽略这些错误
+                    pass
             logger.info("[shutdown] Supabase queue worker stopped")
+    except asyncio.CancelledError:
+        # 在 shutdown 期间，CancelledError 是正常的，不需要记录
+        pass
     except Exception as e:
         logger.warning(f"[shutdown] Failed to stop Supabase queue worker: {e}")
 
@@ -92,8 +104,13 @@ _configure_logging()
 logger = logging.getLogger("workflow")
 
 # Supabase 客户端（可选）
+# 后端服务应使用 SERVICE_ROLE_KEY 以绕过 RLS 策略
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+SUPABASE_KEY = (
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY") 
+    or os.getenv("SUPABASE_SERVICE_KEY") 
+    or os.getenv("SUPABASE_ANON_KEY")
+)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 # OpenRouter 配置（统一管理不同模型服务商）- 优先使用 OPENROUTER_*，兼容旧变量
 OPENROUTER_BASE = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
@@ -133,6 +150,13 @@ video_provider = get_video_provider()
 
 
 async def simulate_video(prompt: str, image_url: str) -> str:
+    """使用配置的视频提供商生成视频（默认 sora2）"""
+    # 确保使用异步模式，避免长时间阻塞
+    if hasattr(video_provider, 'generate'):
+        result = await video_provider.generate(prompt, image_url, duration=10, async_mode=True)
+        if isinstance(result, dict) and result.get("pending"):
+            return result
+        return result.get("video_url") if isinstance(result, dict) else result
     return await video_provider.generate(prompt, image_url, duration=10)
 
 
@@ -725,19 +749,399 @@ async def workflow_upload_image(file: UploadFile = File(...)):
     return {"fileName": stored}
 
 
+# 更新单个 scene 信息
+@app.post("/crewai/scene/update")
+async def update_scene(request: Request):
+    """
+    更新单个 scene 的脚本和图片
+    """
+    try:
+        body = await request.json()
+        message_id = body.get("message_id")
+        scene_idx = int(body.get("scene_idx", 0))
+        script = body.get("script")
+        image_url = body.get("image_url")
+        
+        if not message_id or not scene_idx:
+            return {"error": "缺少必要参数"}
+        
+        # 这里应该更新云端存储（Supabase 或其他存储）
+        # 暂时返回成功，实际实现需要根据存储方案调整
+        result = {
+            "message_id": message_id,
+            "scene_idx": scene_idx,
+        }
+        
+        if script:
+            # 解析脚本为 clips
+            clips = []
+            clip_descs = script.split("；")
+            for idx, desc in enumerate(clip_descs, 1):
+                clips.append({
+                    "idx": idx,
+                    "desc": desc.strip(),
+                    "begin_s": 0.0,  # 需要根据实际情况计算
+                    "end_s": 10.0,
+                })
+            result["clips"] = clips
+        
+        if image_url:
+            result["image_url"] = image_url
+        
+        return result
+    except Exception as e:
+        logger.error(f"[update_scene] Error: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
+# 重新生成单个 scene
+@app.post("/crewai/storyboard/confirm")
+async def confirm_storyboard(request: Request):
+    """
+    确认或拒绝 storyboard，继续或重新生成工作流
+    """
+    try:
+        body = await request.json()
+        run_id = body.get("run_id")
+        confirmed = body.get("confirmed", True)
+        feedback = body.get("feedback", "")
+        
+        if not run_id:
+            return {"error": "缺少 run_id"}
+        
+        # 存储确认状态
+        if not hasattr(confirm_storyboard, "_confirmations"):
+            confirm_storyboard._confirmations = {}
+        
+        confirmation_key = f"{run_id}_storyboard"
+        confirm_storyboard._confirmations[confirmation_key] = {
+            "status": "confirmed" if confirmed else "rejected",
+            "feedback": feedback,
+        }
+        
+        logger.info(f"[confirm_storyboard] Run {run_id}: {'confirmed' if confirmed else 'rejected'}")
+        
+        return {
+            "run_id": run_id,
+            "status": "confirmed" if confirmed else "rejected",
+            "message": "确认成功" if confirmed else "已标记为拒绝，将重新生成"
+        }
+    except Exception as e:
+        logger.error(f"[confirm_storyboard] Error: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
+@app.post("/crewai/scene/regenerate")
+async def regenerate_scene(request: Request):
+    """
+    使用 CrewAI agent 重新生成单个 scene 的脚本和图片
+    """
+    try:
+        body = await request.json()
+        message_id = body.get("message_id")
+        scene_idx = int(body.get("scene_idx", 0))
+        script = body.get("script", "")
+        context = body.get("context", {})
+        
+        if not message_id or not scene_idx:
+            return {"error": "缺少必要参数"}
+        
+        # 使用 director_agent 重新生成 scene 脚本
+        from crewai_agents import build_agents
+        from crewai import Task, Crew, Process
+        
+        [creative_agent, director_agent, reviewer_agent, visual_agent, producer_agent] = build_agents()
+        
+        # 构建重新生成 scene 的任务
+        regenerate_task = Task(
+            description=(
+                f"重新生成场景 {scene_idx} 的分镜脚本：\n"
+                f"当前脚本：{script}\n"
+                f"上下文信息：{context}\n"
+                f"请基于当前脚本和上下文，生成更优化的场景描述和分镜。"
+            ),
+            agent=director_agent,
+            expected_output="更新后的场景脚本（JSON 格式，包含 clips 数组）",
+        )
+        
+        crew = Crew(
+            agents=[director_agent],
+            tasks=[regenerate_task],
+            process=Process.sequential,
+            verbose=True,
+        )
+        
+        # 执行重新生成
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(
+                executor,
+                lambda: crew.kickoff(inputs={})
+            )
+        
+        # 解析结果，提取 clips
+        result_str = str(result)
+        import json
+        import re
+        
+        # 尝试从结果中提取 JSON
+        clips = []
+        try:
+            json_match = re.search(r'\[.*?\]', result_str, re.DOTALL)
+            if json_match:
+                clips_data = json.loads(json_match.group(0))
+                if isinstance(clips_data, list):
+                    clips = clips_data
+        except:
+            # 如果解析失败，使用原始脚本创建 clips
+            clip_descs = script.split("；") if script else []
+            for idx, desc in enumerate(clip_descs, 1):
+                clips.append({
+                    "idx": idx,
+                    "desc": desc.strip(),
+                    "begin_s": 0.0,
+                    "end_s": 10.0,
+                })
+        
+        # 生成图片
+        scene_desc = "；".join([clip.get("desc", "") for clip in clips if clip.get("desc")])
+        image_provider = get_image_provider()
+        image_url = await image_provider.generate(f"{scene_desc}，视频场景画面")
+        
+        return {
+            "message_id": message_id,
+            "scene_idx": scene_idx,
+            "clips": clips,
+            "image_url": image_url,
+        }
+    except Exception as e:
+        logger.error(f"[regenerate_scene] Error: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
 @app.post("/crewai-agent")
 async def run_agent(request: Request):
+    """
+    使用 CrewAI 多智能体工作流生成视频（支持 SSE 流式返回）
+    
+    工作流步骤：
+    1. 创意策划 - 优化提示词和策略
+    2. 导演 - 规划分镜脚本
+    3. 审核 - 审核分镜质量，合并镜头
+    4. 视觉设计 - 生成关键帧（可选）
+    5. 制片 - 提交视频生成任务（使用 sora2）
+    6. 剪辑 - 拼接最终视频
+    """
     body = await request.json()
     prompt = body.get("prompt", "")
     img = body.get("img")
     thread_id = body.get("thread_id") or f"t_{uuid.uuid4().hex[:8]}"
     run_id = body.get("run_id") or f"r_{uuid.uuid4().hex[:8]}"
-
-    async def generator():
-        async for chunk in events(prompt, img, thread_id, run_id):
-            yield chunk
-
-    return StreamingResponse(generator(), media_type="text/event-stream")
+    
+    # 如果提供了完整参数，使用 CrewAI 工作流
+    goal = body.get("goal") or prompt
+    styles = body.get("styles", [])
+    total_duration = float(body.get("total_duration", 10.0))
+    num_clips = int(body.get("num_clips", 0))
+    image_control = bool(body.get("image_control", False))
+    
+    # 检查是否使用 CrewAI 工作流（如果提供了 goal 或 styles，使用工作流）
+    use_crewai_workflow = bool(body.get("goal") or body.get("styles") or body.get("total_duration") or body.get("use_crewai", True))
+    
+    if use_crewai_workflow and goal:
+        # 使用 CrewAI 多智能体工作流
+        async def generator():
+            try:
+                # 开始
+                async for chunk in emit("System", "run_started", run_id, thread_id, 
+                                       delta="🚀 开始 CrewAI 多智能体工作流…", 
+                                       progress={"current": 0, "total": 6}):
+                    yield chunk
+            except Exception as e:
+                logger.error(f"[crewai-agent] Error in generator start: {e}", exc_info=True)
+                try:
+                    async for chunk in emit("System", "error", run_id, thread_id, 
+                                           delta=f"❌ 错误：{str(e)}"):
+                        yield chunk
+                except:
+                    pass
+                return
+            
+            try:
+                
+                # 准备 CrewAI 工作流参数
+                payload = {
+                    "goal": goal,
+                    "styles": styles if isinstance(styles, list) else [],
+                    "total_duration": total_duration,
+                    "num_clips": num_clips,
+                    "image_control": image_control,
+                    "run_id": run_id,
+                }
+                
+                # 注册会话（用于视频任务完成后的回调）
+                try:
+                    from crewai_session_manager import get_session_manager
+                    session_manager = get_session_manager()
+                    if session_manager:
+                        session_id = f"session_{run_id}_{int(datetime.utcnow().timestamp() * 1000)}"
+                        # 计算期望的视频任务数（按10s一个任务）
+                        import math
+                        expected_tasks = max(1, math.ceil(total_duration / 10.0))
+                        
+                        await session_manager.register_session(
+                            run_id=run_id,
+                            session_id=session_id,
+                            expected_clips=expected_tasks,
+                            context={
+                                "goal": goal,
+                                "styles": styles,
+                                "total_duration": total_duration,
+                                "expected_tasks": expected_tasks,
+                                "image_control": image_control,
+                                "status": "running"
+                            }
+                        )
+                        logger.info(
+                            f"[crewai-agent] Registered session: run_id={run_id}, "
+                            f"session_id={session_id}, expected_tasks={expected_tasks}"
+                        )
+                except Exception as e:
+                    logger.warning(f"[crewai-agent] Failed to register session: {e}")
+                    # 继续执行，不阻塞工作流
+                
+                # 1. 创意策划
+                async for chunk in emit("创意策划", "thought", run_id, thread_id, 
+                                       delta="💡 创意策划：分析需求，制定创意策略…", 
+                                       progress={"current": 1, "total": 6}):
+                    yield chunk
+                
+                # 2. 导演分镜
+                async for chunk in emit("导演", "thought", run_id, thread_id, 
+                                       delta="🎬 导演：规划分镜脚本，拆分镜头…", 
+                                       progress={"current": 2, "total": 6}):
+                    yield chunk
+                
+                # 3. 审核
+                async for chunk in emit("审核", "thought", run_id, thread_id, 
+                                       delta="✅ 审核：检查分镜质量，合并镜头为视频任务…", 
+                                       progress={"current": 3, "total": 6}):
+                    yield chunk
+                
+                # 4. 视觉设计（可选）
+                if image_control:
+                    async for chunk in emit("视觉设计", "thought", run_id, thread_id, 
+                                           delta="🎨 视觉设计：生成关键帧…", 
+                                           progress={"current": 4, "total": 6}):
+                        yield chunk
+                
+                # 5. 制片 - 提交视频生成任务
+                async for chunk in emit("制片", "thought", run_id, thread_id, 
+                                       delta="📹 制片：提交视频生成任务（使用 Sora2）…", 
+                                       progress={"current": 5, "total": 6}):
+                    yield chunk
+                
+                # 执行 CrewAI 工作流
+                crew = build_crew(payload)
+                
+                # 在后台线程中执行同步的 CrewAI
+                import concurrent.futures
+                loop = asyncio.get_event_loop()
+                
+                async for chunk in emit("System", "info", run_id, thread_id, 
+                                       delta="⚙️ 执行 CrewAI 工作流中…"):
+                    yield chunk
+                
+                # 在线程池中执行同步的 CrewAI
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    result = await loop.run_in_executor(
+                        executor,
+                        lambda: crew.kickoff(inputs={"storyboards_json": ""})
+                    )
+                
+                result_str = str(result)
+                
+                # 检查结果
+                if "pending" in result_str.lower() or "处理中" in result_str:
+                    async for chunk in emit("制片", "info", run_id, thread_id, 
+                                           delta="⏳ 视频生成任务已提交，正在处理中（3-5分钟）…", 
+                                           payload={"status": "processing"}):
+                        yield chunk
+                    
+                    # 注册任务到数据库
+                    if supabase:
+                        supabase.table("jobs").upsert({
+                            "run_id": run_id,
+                            "slogan": goal,
+                            "status": "processing",
+                            "updated_at": datetime.utcnow().isoformat()
+                        }, on_conflict="run_id").execute()
+                    
+                    # 等待任务完成
+                    async for chunk in emit("System", "info", run_id, thread_id, 
+                                           delta="📡 等待视频生成完成，完成后将自动拼接…"):
+                        yield chunk
+                    
+                    # 发送完成事件，确保流正确关闭
+                    async for chunk in emit("System", "run_finished", run_id, thread_id, 
+                                           delta="⏳ 任务已提交，请等待处理完成…", 
+                                           progress={"current": 5, "total": 6},
+                                           payload={"status": "processing", "run_id": run_id}):
+                        yield chunk
+                    return
+                elif "http" in result_str.lower() or ".mp4" in result_str.lower():
+                    # 任务已完成，提取视频 URL
+                    import re
+                    url_match = re.search(r'https?://[^\s<>"{}|\\^`\[\]]+\.mp4', result_str)
+                    if url_match:
+                        video_url = url_match.group(0)
+                        cdn_url = await upload_url_to_r2(video_url, f"{run_id}.mp4")
+                        
+                        async for chunk in emit("剪辑", "tool_result", run_id, thread_id, 
+                                               delta=f"🎬 最终视频已生成：{cdn_url}", 
+                                               progress={"current": 6, "total": 6}):
+                            yield chunk
+                        
+                        # 持久化成功
+                        share_slug = await persist_success(run_id, goal, "", cdn_url)
+                        
+                        async for chunk in emit("System", "run_finished", run_id, thread_id, 
+                                               delta="✅ 完成！", 
+                                               progress={"current": 6, "total": 6}, 
+                                               payload={"share_slug": share_slug, "video_url": cdn_url}):
+                            yield chunk
+                    else:
+                        async for chunk in emit("System", "error", run_id, thread_id, 
+                                               delta=f"⚠️ 工作流完成，但未找到视频 URL。结果：{result_str[:200]}"):
+                            yield chunk
+                else:
+                    async for chunk in emit("System", "error", run_id, thread_id, 
+                                           delta=f"❌ 工作流执行失败：{result_str[:200]}"):
+                        yield chunk
+                        
+            except Exception as e:
+                logger.error(f"[crewai-agent] Error: {e}", exc_info=True)
+                try:
+                    async for chunk in emit("System", "error", run_id, thread_id, 
+                                           delta=f"❌ 错误：{str(e)}"):
+                        yield chunk
+                    # 发送完成事件，确保流正确关闭
+                    async for chunk in emit("System", "run_finished", run_id, thread_id, 
+                                           delta="❌ 任务失败", 
+                                           progress={"current": 6, "total": 6},
+                                           payload={"status": "failed", "error": str(e)}):
+                        yield chunk
+                except Exception as inner_e:
+                    logger.error(f"[crewai-agent] Error sending error message: {inner_e}", exc_info=True)
+        
+        return StreamingResponse(generator(), media_type="text/event-stream")
+    else:
+        # 使用旧的简单流程（向后兼容）
+        async def generator():
+            async for chunk in events(prompt, img, thread_id, run_id):
+                yield chunk
+        return StreamingResponse(generator(), media_type="text/event-stream")
 
 
 @app.post("/webhook/runninghub")
@@ -1039,6 +1443,452 @@ async def _get_embedding(text: str) -> list[float] | None:
             return data["data"][0]["embedding"]
     except Exception:
         return None
+
+
+@app.post("/crewai-chat")
+async def crewai_chat(request: Request):
+    """
+    对话式视频生成信息收集端点
+    使用创意策划 agent 通过多轮对话收集信息，支持 HITL
+    """
+    body = await request.json()
+    action = body.get("action", "start")
+    thread_id = body.get("thread_id") or f"t_{uuid.uuid4().hex[:8]}"
+    run_id = body.get("run_id") or f"r_{uuid.uuid4().hex[:8]}"
+    user_message = body.get("message", "")
+    
+    # 存储对话状态（在实际应用中应该使用 Redis 或数据库）
+    # 这里使用内存存储，仅用于演示
+    if not hasattr(crewai_chat, "_conversation_states"):
+        crewai_chat._conversation_states = {}
+    
+    state_key = f"{thread_id}_{run_id}"
+    conversation_state = crewai_chat._conversation_states.get(state_key, {
+        "collected_info": {},
+        "current_question": None,
+        "question_history": [],
+    })
+    
+    async def generator():
+        try:
+            try:
+                from creative_agent import (
+                    build_creative_agent_for_chat,
+                    generate_question_with_options,
+                    get_next_question,
+                )
+            except ImportError:
+                # 如果导入失败，使用内联实现
+                def generate_question_with_options(question_type: str, current_info: dict):
+                    VIDEO_TYPES = ["产品宣传视频", "品牌故事视频", "教程视频", "活动推广视频", "社交媒体短视频", "广告片", "产品演示视频", "其他"]
+                    DURATION_OPTIONS = [10, 20, 30, 60, 90, 120]
+                    STYLE_OPTIONS = ["现代简约", "科技感", "温馨生活", "时尚潮流", "商务专业", "创意艺术", "自然清新", "复古怀旧", "动感活力", "优雅高端"]
+                    CONSISTENCY_ELEMENTS = ["品牌Logo", "产品外观", "人物形象", "色彩方案", "字体样式", "包装设计", "用户界面", "场景背景"]
+                    
+                    if question_type == "video_type":
+                        return ("首先，请告诉我您想要制作什么类型的视频？", VIDEO_TYPES)
+                    elif question_type == "duration":
+                        return ("好的，您希望视频的时长是多少秒？", [f"{d}秒" for d in DURATION_OPTIONS])
+                    elif question_type == "style":
+                        return ("请选择视频的风格（可以选择多个）：", STYLE_OPTIONS)
+                    elif question_type == "theme":
+                        return ("请描述视频的主题或核心内容：", [])
+                    elif question_type == "keywords":
+                        return ("请提供一些关键词，这些关键词将帮助理解视频的核心信息（用逗号分隔）：", [])
+                    elif question_type == "key_elements":
+                        return ("请列出视频中需要重点展示的关键元素（用逗号分隔）：", [])
+                    elif question_type == "consistency_elements":
+                        return ("为了确保视频的一致性，请选择需要在所有场景中保持一致的元素（可以选择多个）：", CONSISTENCY_ELEMENTS)
+                    return ("", [])
+                
+                def get_next_question(current_info: dict):
+                    if "video_type" not in current_info:
+                        return "video_type"
+                    if "duration" not in current_info:
+                        return "duration"
+                    if "styles" not in current_info or len(current_info.get("styles", [])) == 0:
+                        return "style"
+                    if "theme" not in current_info:
+                        return "theme"
+                    if "keywords" not in current_info or len(current_info.get("keywords", [])) == 0:
+                        return "keywords"
+                    if "key_elements" not in current_info or len(current_info.get("key_elements", [])) == 0:
+                        return "key_elements"
+                    if "consistency_elements" not in current_info or len(current_info.get("consistency_elements", [])) == 0:
+                        return "consistency_elements"
+                    return None
+                
+                def collect_video_info_tool(current_info: str, question_type: str, user_response: str = None):
+                    info = json.loads(current_info) if current_info else {}
+                    if user_response:
+                        if question_type == "video_type":
+                            info["video_type"] = user_response
+                        elif question_type == "duration":
+                            try:
+                                info["duration"] = float(user_response.replace("秒", ""))
+                            except:
+                                info["duration"] = 10.0
+                        elif question_type == "style":
+                            if "styles" not in info:
+                                info["styles"] = []
+                            if user_response not in info["styles"]:
+                                info["styles"].append(user_response)
+                        elif question_type == "theme":
+                            info["theme"] = user_response
+                        elif question_type == "keywords":
+                            if "keywords" not in info:
+                                info["keywords"] = []
+                            keywords = [k.strip() for k in user_response.split(",") if k.strip()]
+                            info["keywords"].extend(keywords)
+                        elif question_type == "key_elements":
+                            if "key_elements" not in info:
+                                info["key_elements"] = []
+                            elements = [e.strip() for e in user_response.split(",") if e.strip()]
+                            info["key_elements"].extend(elements)
+                        elif question_type == "consistency_elements":
+                            if "consistency_elements" not in info:
+                                info["consistency_elements"] = []
+                            elements = [e.strip() for e in user_response.split(",") if e.strip()]
+                            info["consistency_elements"].extend(elements)
+                    return json.dumps(info, ensure_ascii=False)
+            
+            # 注意：这里不再需要创建 agent 实例，因为对话逻辑是直接实现的
+            # 收集的信息会直接传递给后续的 build_crew 工作流
+            
+            if action == "start":
+                # 开始对话
+                async for chunk in emit("System", "info", run_id, thread_id, 
+                                       delta="创意策划开始收集视频制作信息..."):
+                    yield chunk
+                
+                # 生成第一个问题
+                next_q = get_next_question(conversation_state["collected_info"])
+                if next_q:
+                    question, options = generate_question_with_options(
+                        next_q, conversation_state["collected_info"]
+                    )
+                    conversation_state["current_question"] = next_q
+                    
+                    async for chunk in emit("创意策划", "question", run_id, thread_id,
+                                           delta=question,
+                                           payload={"options": options, "question_type": next_q}):
+                        yield chunk
+                
+                crewai_chat._conversation_states[state_key] = conversation_state
+                
+            elif action == "message" and user_message:
+                # 处理用户回答
+                current_q = conversation_state.get("current_question")
+                if current_q:
+                    # 更新收集的信息（直接使用 Python 逻辑，不通过 Tool）
+                    info = conversation_state["collected_info"]
+                    if current_q == "video_type":
+                        info["video_type"] = user_message
+                    elif current_q == "duration":
+                        try:
+                            info["duration"] = float(user_message.replace("秒", "").strip())
+                        except:
+                            info["duration"] = 10.0
+                    elif current_q == "style":
+                        if "styles" not in info:
+                            info["styles"] = []
+                        if user_message not in info["styles"]:
+                            info["styles"].append(user_message)
+                    elif current_q == "theme":
+                        info["theme"] = user_message
+                    elif current_q == "keywords":
+                        if "keywords" not in info:
+                            info["keywords"] = []
+                        keywords = [k.strip() for k in user_message.split(",") if k.strip()]
+                        info["keywords"].extend(keywords)
+                    elif current_q == "key_elements":
+                        if "key_elements" not in info:
+                            info["key_elements"] = []
+                        elements = [e.strip() for e in user_message.split(",") if e.strip()]
+                        info["key_elements"].extend(elements)
+                    elif current_q == "consistency_elements":
+                        if "consistency_elements" not in info:
+                            info["consistency_elements"] = []
+                        elements = [e.strip() for e in user_message.split(",") if e.strip()]
+                        info["consistency_elements"].extend(elements)
+                    
+                    conversation_state["collected_info"] = info
+                    conversation_state["question_history"].append({
+                        "question": current_q,
+                        "answer": user_message
+                    })
+                
+                # 检查是否所有信息已收集完成
+                next_q = get_next_question(conversation_state["collected_info"])
+                
+                if next_q:
+                    # 还有问题要问
+                    question, options = generate_question_with_options(
+                        next_q, conversation_state["collected_info"]
+                    )
+                    conversation_state["current_question"] = next_q
+                    
+                    async for chunk in emit("创意策划", "question", run_id, thread_id,
+                                           delta=question,
+                                           payload={"options": options, "question_type": next_q}):
+                        yield chunk
+                else:
+                    # 所有信息已收集完成
+                    async for chunk in emit("System", "collected", run_id, thread_id,
+                                           delta="信息收集完成！",
+                                           payload=conversation_state["collected_info"]):
+                        yield chunk
+                    
+                    # 开始生成视频
+                    async for chunk in emit("System", "generating", run_id, thread_id,
+                                           delta="开始生成视频..."):
+                        yield chunk
+                    
+                    # 构建视频生成工作流
+                    collected = conversation_state["collected_info"]
+                    goal = collected.get("theme", "") or collected.get("video_type", "")
+                    styles = collected.get("styles", [])
+                    total_duration = float(collected.get("duration", 10.0))
+                    
+                    # 构建完整的目标描述，包含所有收集的信息
+                    goal_parts = [goal] if goal else []
+                    if collected.get("video_type"):
+                        goal_parts.append(f"视频类型：{collected.get('video_type')}")
+                    if collected.get("keywords"):
+                        goal_parts.append(f"关键词：{', '.join(collected.get('keywords', []))}")
+                    if collected.get("key_elements"):
+                        goal_parts.append(f"关键元素：{', '.join(collected.get('key_elements', []))}")
+                    if collected.get("consistency_elements"):
+                        goal_parts.append(f"一致性元素：{', '.join(collected.get('consistency_elements', []))}")
+                    
+                    full_goal = " | ".join(goal_parts) if goal_parts else goal
+                    
+                    payload = {
+                        "goal": full_goal,  # 使用完整的目标描述
+                        "styles": styles,
+                        "total_duration": total_duration,
+                        "run_id": run_id,
+                        "keywords": collected.get("keywords", []),
+                        "key_elements": collected.get("key_elements", []),
+                        "consistency_elements": collected.get("consistency_elements", []),
+                        "video_type": collected.get("video_type", ""),  # 添加视频类型
+                    }
+                    
+                    # 执行视频生成工作流
+                    crew = build_crew(payload)
+                    
+                    import concurrent.futures
+                    loop = asyncio.get_event_loop()
+                    
+                    async for chunk in emit("System", "info", run_id, thread_id,
+                                           delta="⚙️ 执行视频生成工作流中…"):
+                        yield chunk
+                    
+                    # 存储 storyboard 确认状态
+                    if not hasattr(crewai_chat, "_storyboard_confirmations"):
+                        crewai_chat._storyboard_confirmations = {}
+                    
+                    # 执行工作流，分阶段执行以支持 human input
+                    # 第一阶段：执行到 director_agent 生成 storyboard
+                    async for chunk in emit("导演", "thought", run_id, thread_id,
+                                           delta="🎬 导演正在规划分镜脚本…"):
+                        yield chunk
+                    
+                    # 直接调用 plan_storyboard_impl 生成 storyboard
+                    from crewai_tools import plan_storyboard_impl
+                    goal = payload.get("goal", "")
+                    styles = payload.get("styles", [])
+                    total_duration = float(payload.get("total_duration", 10.0))
+                    
+                    # plan_storyboard_impl 是异步函数，直接 await
+                    storyboard_json = await plan_storyboard_impl(goal, styles, total_duration, 1)
+                    
+                    # 解析 storyboard 数据
+                    storyboard_data = None
+                    try:
+                        storyboard_data = json.loads(storyboard_json)
+                    except Exception as e:
+                        logger.warning(f"[crewai-chat] Failed to parse storyboard: {e}")
+                        # 尝试从字符串中提取
+                        json_match = re.search(r'\{.*?"scenes".*?\}', storyboard_json, re.DOTALL)
+                        if json_match:
+                            storyboard_data = json.loads(json_match.group(0))
+                    
+                    # 如果提取到了 storyboard 数据，发送给前端并等待确认
+                    if storyboard_data and "scenes" in storyboard_data:
+                        # 生成 scene 图片
+                        async for chunk in emit("视觉设计", "thought", run_id, thread_id,
+                                               delta="🎨 正在为场景生成预览图片…"):
+                            yield chunk
+                        
+                        # 为每个 scene 生成图片
+                        # 直接调用内部实现，不使用 Tool 包装
+                        from providers import get_image_provider
+                        image_provider = get_image_provider()
+                        
+                        # 为每个 scene 生成预览图片
+                        scenes = storyboard_data.get("scenes", [])
+                        for scene in scenes:
+                            scene_idx = scene.get("scene_idx", 1)
+                            clips = scene.get("clips", [])
+                            # 合并所有 clips 的描述作为 scene 的描述
+                            scene_desc = "；".join([clip.get("desc", "") for clip in clips if clip.get("desc")])
+                            if not scene_desc:
+                                scene_desc = f"场景{scene_idx}"
+                            
+                            try:
+                                # 为 scene 生成一张代表性图片
+                                image_url = await image_provider.generate(f"{scene_desc}，视频场景画面")
+                                scene["image_url"] = image_url
+                                logger.info(f"[crewai-chat] Generated image for scene {scene_idx}: {image_url}")
+                            except Exception as e:
+                                logger.warning(f"[crewai-chat] Failed to generate image for scene {scene_idx}: {e}")
+                                scene["image_url"] = None
+                        
+                        # storyboard_data 已经更新，包含 image_url
+                        
+                        # 发送 storyboard 给前端，等待用户确认
+                        async for chunk in emit("System", "storyboard_pending", run_id, thread_id,
+                                               delta="故事板已生成，请审核并确认",
+                                               payload={
+                                                   "storyboard": storyboard_data,
+                                                   "requires_confirmation": True
+                                               }):
+                            yield chunk
+                        
+                        # 等待用户确认
+                        confirmation_key = f"{run_id}_storyboard"
+                        crewai_chat._storyboard_confirmations[confirmation_key] = {
+                            "status": "pending",
+                            "storyboard": storyboard_data,
+                        }
+                        
+                        # 轮询等待确认（最多等待 5 分钟）
+                        import time
+                        max_wait_time = 300  # 5 分钟
+                        start_time = time.time()
+                        confirmed = False
+                        while time.time() - start_time < max_wait_time:
+                            await asyncio.sleep(1)  # 每秒检查一次
+                            confirmation = crewai_chat._storyboard_confirmations.get(confirmation_key)
+                            
+                            # 同时检查 confirm_storyboard 端点的确认状态
+                            if not confirmation and hasattr(confirm_storyboard, "_confirmations"):
+                                confirmation = confirm_storyboard._confirmations.get(confirmation_key)
+                                if confirmation:
+                                    # 同步到 crewai_chat 的存储
+                                    crewai_chat._storyboard_confirmations[confirmation_key] = confirmation
+                            
+                            if confirmation and confirmation.get("status") == "confirmed":
+                                # 用户已确认，继续执行
+                                confirmed = True
+                                break
+                            elif confirmation and confirmation.get("status") == "rejected":
+                                # 用户拒绝，需要重新生成
+                                async for chunk in emit("System", "info", run_id, thread_id,
+                                                       delta="用户要求重新生成故事板，正在重新规划…"):
+                                    yield chunk
+                                # 重新生成 storyboard（plan_storyboard_impl 是异步函数）
+                                storyboard_json = await plan_storyboard_impl(goal, styles, total_duration, 1)
+                                
+                                # 重新解析和生成图片
+                                try:
+                                    storyboard_data = json.loads(storyboard_json)
+                                except:
+                                    json_match = re.search(r'\{.*?"scenes".*?\}', storyboard_json, re.DOTALL)
+                                    if json_match:
+                                        storyboard_data = json.loads(json_match.group(0))
+                                
+                                # 重新生成图片（直接调用内部实现）
+                                from providers import get_image_provider
+                                image_provider = get_image_provider()
+                                
+                                scenes = storyboard_data.get("scenes", [])
+                                for scene in scenes:
+                                    scene_idx = scene.get("scene_idx", 1)
+                                    clips = scene.get("clips", [])
+                                    scene_desc = "；".join([clip.get("desc", "") for clip in clips if clip.get("desc")])
+                                    if not scene_desc:
+                                        scene_desc = f"场景{scene_idx}"
+                                    
+                                    try:
+                                        image_url = await image_provider.generate(f"{scene_desc}，视频场景画面")
+                                        scene["image_url"] = image_url
+                                        logger.info(f"[crewai-chat] Regenerated image for scene {scene_idx}: {image_url}")
+                                    except Exception as e:
+                                        logger.warning(f"[crewai-chat] Failed to regenerate image for scene {scene_idx}: {e}")
+                                        scene["image_url"] = None
+                                
+                                # 再次发送给用户确认
+                                async for chunk in emit("System", "storyboard_pending", run_id, thread_id,
+                                                       delta="已重新生成故事板，请审核",
+                                                       payload={
+                                                           "storyboard": storyboard_data,
+                                                           "requires_confirmation": True,
+                                                           "run_id": run_id
+                                                       }):
+                                    yield chunk
+                                
+                                crewai_chat._storyboard_confirmations[confirmation_key] = {
+                                    "status": "pending",
+                                    "storyboard": storyboard_data,
+                                }
+                                start_time = time.time()  # 重置计时器
+                                continue
+                        else:
+                            # 超时，继续执行
+                            logger.warning(f"[crewai-chat] Storyboard confirmation timeout for {run_id}")
+                            confirmed = True  # 超时后默认继续
+                    
+                    # 继续执行后续流程（审核、合并、生成视频等）
+                    if confirmed and storyboard_data:
+                        async for chunk in emit("System", "info", run_id, thread_id,
+                                               delta="故事板已确认，继续执行后续流程…"):
+                            yield chunk
+                    
+                    # 执行剩余的工作流（从审核开始）
+                    # 使用已确认的 storyboard 继续执行完整工作流
+                    storyboards_json = json.dumps(storyboard_data, ensure_ascii=False)
+                    
+                    def execute_remaining_workflow():
+                        """执行剩余的工作流"""
+                        from crewai_workflow import build_crew
+                        # 使用已确认的 storyboard 继续执行完整工作流
+                        remaining_crew = build_crew(payload)
+                        return remaining_crew.kickoff(inputs={"storyboards_json": storyboards_json})
+                    
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        result = await loop.run_in_executor(
+                            executor,
+                            execute_remaining_workflow
+                        )
+                    
+                    result_str = str(result)
+                    
+                    # 检查结果
+                    if "http" in result_str.lower() or ".mp4" in result_str.lower():
+                        import re
+                        url_match = re.search(r'https?://[^\s<>"{}|\\^`\[\]]+\.mp4', result_str)
+                        if url_match:
+                            video_url = url_match.group(0)
+                            async for chunk in emit("System", "completed", run_id, thread_id,
+                                                   delta="✅ 视频生成完成！",
+                                                   payload={"video_url": video_url}):
+                                yield chunk
+                    else:
+                        async for chunk in emit("System", "error", run_id, thread_id,
+                                               delta=f"⚠️ 工作流完成，但未找到视频 URL。结果：{result_str[:200]}"):
+                            yield chunk
+                
+                crewai_chat._conversation_states[state_key] = conversation_state
+            
+        except Exception as e:
+            logger.error(f"[crewai-chat] Error: {e}", exc_info=True)
+            async for chunk in emit("System", "error", run_id, thread_id,
+                                   delta=f"❌ 错误：{str(e)}"):
+                yield chunk
+    
+    return StreamingResponse(generator(), media_type="text/event-stream")
 
 
 @app.get("/recommend/{slug}")

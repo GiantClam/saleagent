@@ -98,15 +98,47 @@ class RunningHubClient:
         raise RunningHubError(f"上传失败：{type(last_err).__name__}: {last_err}")
 
     async def create_task(self, workflow_id: str, node_info_list: List[Dict[str, Any]]) -> str:
-        data = await self._post_json(
-            "https://www.runninghub.cn/task/openapi/create",
-            {"apiKey": self.api_key, "workflowId": workflow_id, "nodeInfoList": node_info_list},
+        import logging
+        logger = logging.getLogger("crewai_tools")
+        
+        logger.info(
+            f"[RunningHubClient] Creating task via API: "
+            f"url=https://www.runninghub.cn/task/openapi/create, "
+            f"workflow_id={workflow_id}, "
+            f"node_info_list_count={len(node_info_list)}, "
+            f"api_key_length={len(self.api_key) if self.api_key else 0}"
         )
-        d = data.get("data") or {}
-        task_id = d.get("taskId") or d.get("id")
-        if not task_id:
-            raise RunningHubError(f"创建任务返回缺少 taskId：{data}")
-        return str(task_id)
+        
+        payload = {
+            "apiKey": self.api_key, 
+            "workflowId": workflow_id, 
+            "nodeInfoList": node_info_list
+        }
+        logger.debug(f"[RunningHubClient] Request payload: {payload}")
+        
+        try:
+            data = await self._post_json(
+                "https://www.runninghub.cn/task/openapi/create",
+                payload,
+            )
+            logger.info(f"[RunningHubClient] API response received: {data}")
+            
+            d = data.get("data") or {}
+            task_id = d.get("taskId") or d.get("id")
+            if not task_id:
+                logger.error(f"[RunningHubClient] Missing taskId in response: {data}")
+                raise RunningHubError(f"创建任务返回缺少 taskId：{data}")
+            
+            logger.info(f"[RunningHubClient] Task created successfully: task_id={task_id}")
+            return str(task_id)
+        except Exception as e:
+            logger.error(
+                f"[RunningHubClient] Failed to create task: {e}, "
+                f"workflow_id={workflow_id}, "
+                f"node_info_list={node_info_list}",
+                exc_info=True
+            )
+            raise
 
     async def get_status(self, task_id: str) -> str:
         data = await self._post_json(

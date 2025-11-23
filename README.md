@@ -5,6 +5,18 @@
 ## 本地开发
 
 ### 前端（apps/web）
+
+**Linux/macOS:**
+```bash
+./scripts/start-frontend.sh
+```
+
+**Windows PowerShell:**
+```powershell
+.\scripts\start-frontend.ps1
+```
+
+**手动启动:**
 ```bash
 cd apps/web
 pnpm i # 或 npm i / yarn
@@ -21,6 +33,18 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
 ```
 
 ### 后端（apps/agent）
+
+**Linux/macOS:**
+```bash
+./scripts/start-backend.sh
+```
+
+**Windows PowerShell:**
+```powershell
+.\scripts\start-backend.ps1
+```
+
+**手动启动:**
 ```bash
 cd apps/agent
 pip install -r requirements.txt

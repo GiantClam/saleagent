@@ -48,7 +48,8 @@ class CrewAISessionManager:
     def _ensure_table(self):
         """确保 crew_sessions 表存在"""
         try:
-            self.supabase.table("crew_sessions").select("id").limit(1).execute()
+            # 使用 run_id 查询，因为表的主键是 run_id，不是 id
+            self.supabase.table("crew_sessions").select("run_id").limit(1).execute()
             self.logger.info("[CrewAISessionManager] Table 'crew_sessions' exists")
         except Exception as e:
             self.logger.warning(
@@ -114,14 +115,14 @@ class CrewAISessionManager:
             True 如果已触发拼接，False 如果还有未完成的任务
         """
         try:
-            # 获取会话信息
+            # 获取会话信息（不使用 .single()，因为可能没有记录）
             session_result = self.supabase.table("crew_sessions")\
                 .select("*")\
                 .eq("run_id", run_id)\
-                .single()\
                 .execute()
             
-            if not session_result.data:
+            # 检查是否有数据
+            if not session_result.data or len(session_result.data) == 0:
                 self.logger.warning(
                     f"[CrewAISessionManager] No session found for run_id={run_id}. "
                     f"This might mean the session was not registered. "
@@ -129,7 +130,14 @@ class CrewAISessionManager:
                 )
                 return False
             
-            session = session_result.data
+            # 如果有多条记录，使用第一条（理论上应该只有一条）
+            if len(session_result.data) > 1:
+                self.logger.warning(
+                    f"[CrewAISessionManager] Multiple sessions found for run_id={run_id}, "
+                    f"using the first one. This should not happen."
+                )
+            
+            session = session_result.data[0]
             expected_tasks = session.get("expected_clips", 0)  # 注意：这里存储的是期望的视频任务数，不是镜头数
             current_status = session.get("status", "waiting_videos")
             
@@ -174,8 +182,23 @@ class CrewAISessionManager:
                             .eq("run_id", run_id)\
                             .execute()
                         # 继续执行下面的检查逻辑
-                else:
-                    self.logger.debug(
+                elif current_status == "stitching":
+                    # 如果正在拼接，检查是否已经完成（可能拼接在后台完成）
+                    if result and "http" in result.lower() and "example.com" not in result.lower():
+                        # 拼接已完成，更新状态
+                        self.supabase.table("crew_sessions")\
+                            .update({
+                                "status": "completed",
+                                "updated_at": datetime.utcnow().isoformat()
+                            })\
+                            .eq("run_id", run_id)\
+                            .execute()
+                        self.logger.info(
+                            f"[CrewAISessionManager] Stitch already completed (found result), updated status to completed: {result[:100]}"
+                        )
+                        return True
+                    else:
+                        self.logger.debug(
                         f"[CrewAISessionManager] Session {run_id} already in status: {current_status}, skipping"
                     )
                     return False
@@ -338,44 +361,81 @@ class CrewAISessionManager:
             session_check = self.supabase.table("crew_sessions")\
                 .select("status, result")\
                 .eq("run_id", run_id)\
-                .single()\
                 .execute()
             
-            if session_check.data:
-                current_status = session_check.data.get("status", "")
-                result = session_check.data.get("result", "")
-                
-                # 如果已经完成且有有效结果，跳过
-                if current_status == "completed" and result and "http" in result.lower():
-                    # 检查 result 是否是有效的 URL（不包含 example.com）
-                    r2_public_base = os.getenv("R2_PUBLIC_BASE", "")
-                    is_valid_url = (
-                        result and 
-                        ("http" in result.lower() or result.startswith("https://")) and
-                        "example.com" not in result.lower() and
-                        (not r2_public_base or result.startswith(r2_public_base.rstrip("/")))
+            # 检查是否有数据
+            if not session_check.data or len(session_check.data) == 0:
+                self.logger.warning(
+                    f"[CrewAISessionManager] No session found for run_id={run_id} during stitch check"
+                )
+                return
+            
+            # 使用第一条记录
+            session_data = session_check.data[0]
+            
+            current_status = session_data.get("status", "")
+            result = session_data.get("result", "")
+            
+            # 如果已经有 result 但状态不是 completed，先更新状态
+            if result and "http" in result.lower() and "example.com" not in result.lower():
+                if current_status != "completed":
+                    self.logger.info(
+                        f"[CrewAISessionManager] Found result but status is {current_status}, updating to completed: {result[:100]}"
                     )
-                    
-                    if is_valid_url:
-                        self.logger.info(
-                            f"[CrewAISessionManager] Stitch already completed for run_id={run_id}, "
-                            f"result={result[:100]}, skipping"
-                        )
-                        return
-                    else:
-                        # result 包含 example.com 或无效，需要重新执行拼接
-                        self.logger.warning(
-                            f"[CrewAISessionManager] Stitch result is invalid (contains example.com): {result[:100]}. "
-                            f"Re-executing stitch to generate correct URL."
-                        )
-                        # 重置状态，继续执行拼接
-                        self.supabase.table("crew_sessions")\
-                            .update({
-                                "status": "stitching",
-                                "updated_at": datetime.utcnow().isoformat()
-                            })\
-                            .eq("run_id", run_id)\
-                            .execute()
+                    self.supabase.table("crew_sessions")\
+                        .update({
+                            "status": "completed",
+                            "updated_at": datetime.utcnow().isoformat()
+                        })\
+                        .eq("run_id", run_id)\
+                        .execute()
+                    # 更新 jobs 表
+                    try:
+                        goal = context.get("goal", "") if context else ""
+                        cover_url = context.get("cover_url", "") if context else ""
+                        self.supabase.table("jobs").upsert({
+                            "run_id": run_id,
+                            "slogan": goal,
+                            "cover_url": cover_url,
+                            "video_url": result,
+                            "status": "succeeded",
+                            "updated_at": datetime.utcnow().isoformat()
+                        }, on_conflict="run_id").execute()
+                    except Exception as e:
+                        self.logger.warning(f"[CrewAISessionManager] Failed to update jobs table: {e}")
+                    return
+            
+            # 如果已经完成且有有效结果，跳过
+            if current_status == "completed" and result and "http" in result.lower():
+                # 检查 result 是否是有效的 URL（不包含 example.com）
+                r2_public_base = os.getenv("R2_PUBLIC_BASE", "")
+                is_valid_url = (
+                    result and 
+                    ("http" in result.lower() or result.startswith("https://")) and
+                    "example.com" not in result.lower() and
+                    (not r2_public_base or result.startswith(r2_public_base.rstrip("/")))
+                )
+                
+                if is_valid_url:
+                    self.logger.info(
+                        f"[CrewAISessionManager] Stitch already completed for run_id={run_id}, "
+                        f"result={result[:100]}, skipping"
+                    )
+                    return
+                else:
+                    # result 包含 example.com 或无效，需要重新执行拼接
+                    self.logger.warning(
+                        f"[CrewAISessionManager] Stitch result is invalid (contains example.com): {result[:100]}. "
+                        f"Re-executing stitch to generate correct URL."
+                    )
+                    # 重置状态，继续执行拼接
+                    self.supabase.table("crew_sessions")\
+                        .update({
+                            "status": "stitching",
+                            "updated_at": datetime.utcnow().isoformat()
+                        })\
+                        .eq("run_id", run_id)\
+                        .execute()
                         # 继续执行拼接逻辑
             # 获取所有完成的视频片段
             from video_task_queue_supabase import get_supabase_queue
@@ -455,6 +515,43 @@ class CrewAISessionManager:
             self.logger.info(
                 f"[CrewAISessionManager] Stitch completed for run_id={run_id}: {final_video_url}"
             )
+            
+            # 更新 jobs 表的状态为 completed（前端通过 jobs 表检查任务状态）
+            try:
+                # 从 context 中获取 goal（slogan）和 cover_url
+                goal = context.get("goal", "") if context else ""
+                cover_url = context.get("cover_url", "") if context else ""
+                
+                # 如果 context 中没有 goal，尝试从 crew_sessions 表中获取
+                if not goal:
+                    session_result = self.supabase.table("crew_sessions")\
+                        .select("context")\
+                        .eq("run_id", run_id)\
+                        .execute()
+                    if session_result.data and len(session_result.data) > 0:
+                        session_context = session_result.data[0].get("context", {})
+                        if isinstance(session_context, dict):
+                            goal = session_context.get("goal", "")
+                
+                # 更新 jobs 表
+                self.supabase.table("jobs").upsert({
+                    "run_id": run_id,
+                    "slogan": goal,
+                    "cover_url": cover_url,
+                    "video_url": final_video_url,
+                    "status": "succeeded",  # 使用 "succeeded" 而不是 "completed"，与 persist_success 保持一致
+                    "updated_at": datetime.utcnow().isoformat()
+                }, on_conflict="run_id").execute()
+                
+                self.logger.info(
+                    f"[CrewAISessionManager] Updated jobs table for run_id={run_id}: status=succeeded, video_url={final_video_url}, goal={goal[:50] if goal else 'N/A'}"
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"[CrewAISessionManager] Failed to update jobs table for run_id={run_id}: {e}",
+                    exc_info=True
+                )
+                # 不抛出异常，避免影响拼接完成的状态更新
             
             # 发送回调通知（如果有回调 URL）
             await self._send_callback_notification(session_id, run_id, final_video_url)

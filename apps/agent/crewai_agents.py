@@ -6,11 +6,18 @@ from crewai_tools import optimize_prompt_tool, plan_storyboard_tool, review_stor
 def build_agents() -> List[Agent]:
     creative_agent = Agent(
         role="创意策划",
-        goal="根据用户输入和品牌调性进行创意构思和策略制定",
-        backstory="你是一位资深的创意策划，擅长将用户需求转化为创意策略和视觉语言。",
+        goal="根据用户输入和品牌调性进行创意构思和策略制定。你负责接收来自创意策划对话阶段收集的完整信息，并基于这些信息完善创意策略。",
+        backstory=(
+            "你是一位资深的创意策划，擅长将用户需求转化为创意策略和视觉语言。"
+            "你接收来自创意策划对话阶段收集的完整信息（包括视频类型、时长、风格、主题、关键词、关键元素、一致性元素等），"
+            "并基于这些信息进行深入的创意构思和策略制定。"
+            "你的工作是将用户的需求转化为可执行的创意方案，为后续的导演、制片人等团队成员提供清晰的创意指导。"
+        ),
         tools=[optimize_prompt_tool],  # type: ignore[arg-type]
         verbose=True,
         allow_delegation=False,
+        reasoning=True,  # 启用 reasoning，让 agent 在制定创意策略前进行思考
+        max_reasoning_attempts=3,
     )
 
     director_agent = Agent(
@@ -49,15 +56,15 @@ def build_agents() -> List[Agent]:
         allow_delegation=False,
     )
     
-    editor_agent = Agent(
-        role="剪辑师",
-        goal="根据分镜头和导演的创意，将拍摄的素材进行剪辑、合并，构建影片的叙事结构",
-        backstory="你是一位专业的视频剪辑师，擅长根据分镜头和导演的创意，将拍摄的素材进行剪辑、合并，构建影片的叙事结构。",
-        tools=[stitch_video_tool],  # type: ignore[arg-type]
-        verbose=True,
-        allow_delegation=False,
-    )
+    # editor_agent = Agent(
+    #     role="剪辑师",
+    #     goal="根据分镜头和导演的创意，将拍摄的素材进行剪辑、合并，构建影片的叙事结构",
+    #     backstory="你是一位专业的视频剪辑师，擅长根据分镜头和导演的创意，将拍摄的素材进行剪辑、合并，构建影片的叙事结构。",
+    #     tools=[stitch_video_tool],  # type: ignore[arg-type]
+    #     verbose=True,
+    #     allow_delegation=False,
+    # )
 
-    return [creative_agent, director_agent, reviewer_agent, visual_agent, producer_agent, editor_agent]
+    return [creative_agent, director_agent, reviewer_agent, visual_agent, producer_agent]
 
 

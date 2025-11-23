@@ -429,45 +429,62 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
     
     # 使用专门的分镜模型（默认 gpt-4o-mini，结构化输出更稳定）
     model = STORYBOARD_LLM_MODEL
-    # 要求输出严格的 JSON 对象（包含 storyboards 数组），提供明确格式示例
+    # 计算需要多少个 scene（每个 scene 10s）
+    num_scenes = max(1, int(total_duration / 10.0) + (1 if total_duration % 10.0 > 0 else 0))
+    
+    # 要求输出严格的 JSON 对象（包含 scenes 数组），每个 scene 包含多个镜头
     sys_prompt = (
-        "你是资深广告导演。根据用户目标与风格，将整个视频拆分为完整的可拍摄的镜头，每个分镜头最长不超过10s。\n\n"
-        "【重要】时长要求：\n"
-        "1. 每个镜头的时长（end_s - begin_s）必须不超过10s\n"
-        "2. 如果某个镜头内容需要超过10s，应该拆分为多个镜头\n"
-        "3. 镜头数量可以根据需要灵活调整，但每个镜头时长不能超过10s\n\n"
+        "你是资深广告导演。根据用户目标与风格，将整个视频拆分为场景（scene），每个场景包含多个镜头（clip）。\n\n"
+        "【重要】结构要求：\n"
+        "1. 视频由多个场景（scene）组成，每个场景时长恰好为10秒\n"
+        "2. 每个场景包含多个镜头（clip），镜头数量可以根据内容需要灵活调整\n"
+        "3. 每个镜头的时长（end_s - begin_s）必须不超过10s\n"
+        "4. 场景内的镜头时间必须连续，且场景总时长必须恰好为10s\n\n"
         "【重要】输出格式要求（必须严格遵守）：\n"
         "1. 严格只输出 JSON 对象，不要任何额外文字、说明、Markdown 代码块或注释\n"
-        "2. JSON 结构必须为：{\"storyboards\": [{\"idx\": 1, \"desc\": \"…\", \"begin_s\": 0.0, \"end_s\": 5.0}, {\"idx\": 2, \"desc\": \"…\", \"begin_s\": 5.0, \"end_s\": 10.0}, ...]}\n"
-        "3. 必须包含 begin_s 和 end_s 字段，且 end_s - begin_s <= 10.0\n"
-        "4. 禁止使用其他格式，如：\n"
-        "   - 禁止使用 {\"镜头1\": {...}} 格式\n"
-        "   - 禁止使用 {\"内容\": \"...\", \"表现\": \"...\"} 格式\n"
-        "   - 禁止使用任何中文键名（如\"内容\"、\"描述\"、\"表现\"等）\n"
-        "   - 必须使用 \"idx\", \"desc\", \"begin_s\", \"end_s\" 作为键名\n"
-        "5. desc 为一句中文分镜描述（20-50字），不含编号/时间/标题/Markdown 符号\n"
-        "6. 不要输出 keyframes，这些由后续工具生成\n\n"
+        "2. JSON 结构必须为：{\"scenes\": [{\"scene_idx\": 1, \"clips\": [{\"idx\": 1, \"desc\": \"…\", \"begin_s\": 0.0, \"end_s\": 3.0}, ...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
+        "3. 每个 scene 必须包含 scene_idx, clips, begin_s, end_s 字段\n"
+        "4. 每个 clip 必须包含 idx, desc, begin_s, end_s 字段，且 end_s - begin_s <= 10.0\n"
+        "5. scene 的 begin_s 和 end_s 必须恰好相差 10.0 秒\n"
+        "6. scene 内的 clips 时间必须连续，且覆盖整个 scene 的时长\n"
+        "7. desc 为一句中文分镜描述（20-50字），不含编号/时间/标题/Markdown 符号\n"
+        "8. 不要输出 keyframes，这些由后续工具生成\n\n"
         "【正确示例】（必须完全按照此格式）：\n"
         "{\n"
-        "  \"storyboards\": [\n"
-        "    {\"idx\": 1, \"desc\": \"特写iPhone 17摄像头模组，金属边框反射冷冽蓝光，背景纯黑，镜头缓慢推进\"},\n"
-        "    {\"idx\": 2, \"desc\": \"中景悬浮的iPhone 17完整机身，钛金属边框流转霓虹光效，手机360度旋转展示\"}\n"
+        "  \"scenes\": [\n"
+        "    {\n"
+        "      \"scene_idx\": 1,\n"
+        "      \"begin_s\": 0.0,\n"
+        "      \"end_s\": 10.0,\n"
+        "      \"clips\": [\n"
+        "        {\"idx\": 1, \"desc\": \"特写iPhone 17摄像头模组，金属边框反射冷冽蓝光，背景纯黑，镜头缓慢推进\", \"begin_s\": 0.0, \"end_s\": 3.0},\n"
+        "        {\"idx\": 2, \"desc\": \"中景悬浮的iPhone 17完整机身，钛金属边框流转霓虹光效\", \"begin_s\": 3.0, \"end_s\": 7.0},\n"
+        "        {\"idx\": 3, \"desc\": \"手机360度旋转展示，突出轻薄设计\", \"begin_s\": 7.0, \"end_s\": 10.0}\n"
+        "      ]\n"
+        "    },\n"
+        "    {\n"
+        "      \"scene_idx\": 2,\n"
+        "      \"begin_s\": 10.0,\n"
+        "      \"end_s\": 20.0,\n"
+        "      \"clips\": [...]\n"
+        "    }\n"
         "  ]\n"
         "}\n\n"
         "【错误示例】（禁止使用）：\n"
-        "❌ {\"镜头1\": {\"内容\": \"...\", \"表现\": \"...\"}}\n"
-        "❌ {\"内容\": \"...\", \"描述\": \"...\"}\n"
+        "❌ {\"storyboards\": [...]} （旧格式，已废弃）\n"
+        "❌ {\"镜头1\": {...}} 格式\n"
         "❌ 任何包含中文键名的格式\n\n"
-        "请严格按照正确示例的格式返回，不要使用任何其他格式。"
+        f"请严格按照正确示例的格式返回，生成恰好 {num_scenes} 个场景，每个场景恰好10秒。"
     )
     user_prompt = (
         f"主体目标：{goal}\n"
         f"风格：{', '.join(styles) if styles else '通用'}\n"
-        f"镜头数：{num_clips}（必须严格生成恰好 {num_clips} 个镜头，不能多也不能少）\n"
-        f"总时长：{total_duration}s\n\n"
-        f"请严格按上述 JSON 结构返回，storyboards 数组必须包含恰好 {num_clips} 个元素，不要包含示例之外的任何文字或 Markdown。\n"
-        f"【重要】必须返回有效的 JSON 格式，使用 \"idx\" 和 \"desc\" 作为键名。\n"
-        f"【关键】镜头数量必须严格等于 {num_clips}，不能多也不能少。如果生成的数量不对，会被拒绝并要求重写。"
+        f"总时长：{total_duration}秒\n"
+        f"场景数：{num_scenes}（必须严格生成恰好 {num_scenes} 个场景，每个场景恰好10秒）\n\n"
+        f"请严格按上述 JSON 结构返回，scenes 数组必须包含恰好 {num_scenes} 个场景。\n"
+        f"每个场景必须包含多个镜头（clips），镜头数量可以根据内容需要灵活调整。\n"
+        f"【重要】必须返回有效的 JSON 格式，使用 \"scenes\" 作为顶层数组，每个 scene 包含 \"scene_idx\", \"clips\", \"begin_s\", \"end_s\"。\n"
+        f"【关键】场景数量必须严格等于 {num_scenes}，每个场景的时长必须恰好为10秒。"
     )
     
     logger.info(f"[plan_storyboard_impl] Calling OpenRouter with model={model}, num_clips={num_clips}")
@@ -566,15 +583,54 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         logger.warning(f"[plan_storyboard_impl] empty outline from OpenRouter (outline={repr(outline)}), trying quick retry without structured output")
         try:
             # 重试时不使用结构化输出，降低失败概率
+            # 简化 prompt，减少复杂度
+            simplified_sys_prompt = (
+                "你是资深广告导演。根据用户目标与风格，将整个视频拆分为场景（scene），每个场景包含多个镜头（clip）。\n\n"
+                "输出格式：严格的 JSON 对象，结构为 {\"scenes\": [{\"scene_idx\": 1, \"clips\": [{\"idx\": 1, \"desc\": \"...\", \"begin_s\": 0.0, \"end_s\": 3.0}, ...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
+                f"请生成恰好 {num_scenes} 个场景，每个场景恰好10秒。"
+            )
+            simplified_user_prompt = (
+                f"目标：{goal}\n"
+                f"风格：{', '.join(styles) if styles else '通用'}\n"
+                f"总时长：{total_duration}秒\n"
+                f"请返回 JSON 格式的分镜脚本。"
+            )
+            
             outline = await or_client.chat_completions(
                 model=model,
-                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
-                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": simplified_sys_prompt},
+                    {"role": "user", "content": simplified_user_prompt}
+                ],
+                temperature=0.3,
                 max_tokens=calculated_max_tokens,
                 response_format=None,  # 不使用结构化输出，让模型自由输出
             )
             if not outline or not isinstance(outline, str) or len(outline.strip()) == 0:
-                raise RuntimeError("OpenRouter 返回空内容，即使重试后仍为空")
+                # 最后一次尝试：使用更简单的模型或不同的参数
+                logger.warning(f"[plan_storyboard_impl] Second retry also failed, trying with different model or parameters")
+                # 如果当前模型是 gpt-5-mini，尝试使用 gpt-4o-mini
+                fallback_model = "openai/gpt-4o-mini" if "gpt-5" in model else model
+                if fallback_model != model:
+                    logger.info(f"[plan_storyboard_impl] Falling back to model: {fallback_model}")
+                    outline = await or_client.chat_completions(
+                        model=fallback_model,
+                        messages=[
+                            {"role": "system", "content": simplified_sys_prompt},
+                            {"role": "user", "content": simplified_user_prompt}
+                        ],
+                        temperature=0.5,
+                        max_tokens=calculated_max_tokens,
+                        response_format=None,
+                    )
+                
+                if not outline or not isinstance(outline, str) or len(outline.strip()) == 0:
+                    raise RuntimeError("OpenRouter 返回空内容，即使重试后仍为空。可能是模型拒绝生成或 API 配置问题。")
+        except OpenRouterError as e:
+            # OpenRouter 特定错误（如模型拒绝）
+            error_msg = f"OpenRouter 错误: {str(e)}"
+            logger.error(f"[plan_storyboard_impl] {error_msg}", exc_info=True)
+            raise RuntimeError(f"分镜生成失败：{error_msg}。")
         except Exception as e:
             error_msg = f"重试失败: {str(e)}"
             logger.error(f"[plan_storyboard_impl] {error_msg}", exc_info=True)
@@ -584,99 +640,101 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
     except Exception:
         pass
     
-    # 解析输出为镜头描述列表：优先 JSON 对象->storyboards；其次 JSON 数组；最后清洗行文本
+    # 解析输出为 scene 结构：优先 JSON 对象->scenes；兼容旧格式 storyboards
     import json, re
-    lines: List[str] = []
     
-    def _extract_lines(text: str) -> List[str]:
-        """从文本中提取分镜描述列表。"""
+    def _extract_scenes(text: str) -> dict:
+        """从文本中提取 scene 结构。"""
         # 1. 代码围栏
-        fenced = re.findall(r"```(?:json)?\\s*([\\s\\S]*?)```", text, flags=re.IGNORECASE)
+        fenced = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
         t = fenced[0] if fenced else text.strip()
-        # 2. 尝试对象 storyboards
+        
+        # 2. 尝试新格式：scenes
+        try:
+            obj = json.loads(t)
+            if isinstance(obj, dict) and isinstance(obj.get("scenes"), list):
+                scenes = obj["scenes"]
+                # 验证 scene 结构
+                for scene in scenes:
+                    if not isinstance(scene, dict):
+                        continue
+                    if "clips" not in scene or not isinstance(scene["clips"], list):
+                        continue
+                    # 验证每个 clip
+                    for clip in scene["clips"]:
+                        if not isinstance(clip, dict) or "desc" not in clip:
+                            continue
+                return {"scenes": scenes}
+        except Exception as e:
+            logger.debug(f"[plan_storyboard_impl] Failed to parse scenes format: {e}")
+        
+        # 3. 兼容旧格式：storyboards（转换为 scenes）
         try:
             obj = json.loads(t)
             if isinstance(obj, dict) and isinstance(obj.get("storyboards"), list):
-                arr = obj["storyboards"]
-                out: List[str] = []
-                for it in arr:
-                    if isinstance(it, dict) and "desc" in it:
-                        desc = str(it["desc"]).strip().strip('\"').strip("'")
-                        if desc:
-                            out.append(desc)
-                if out:
-                    return out
-        except Exception:
-            pass
-        # 2.5. 尝试处理 {"镜头1": {"内容": "...", "表现": "..."}} 格式
-        try:
-            obj = json.loads(t)
-            if isinstance(obj, dict):
-                out: List[str] = []
-                # 按键名排序，确保顺序正确
-                sorted_keys = sorted([k for k in obj.keys() if "镜头" in str(k) or k.isdigit()], 
-                                   key=lambda x: int(re.search(r'\\d+', str(x)).group()) if re.search(r'\\d+', str(x)) else 999)
-                for key in sorted_keys:
-                    item = obj[key]
-                    if isinstance(item, dict):
-                        # 优先使用 "内容"，其次 "desc"，最后 "描述"
-                        desc = item.get("内容") or item.get("desc") or item.get("描述") or ""
-                        if desc:
-                            out.append(str(desc).strip().strip('\"').strip("'"))
-                if out:
-                    logger.info(f"[plan_storyboard_impl] Extracted {len(out)} descriptions from alternative format")
-                    return out
-        except Exception:
-            pass
-        # 3. 尝试数组
-        try:
-            l = t.find("["); r = t.rfind("]")
-            if l != -1 and r != -1 and r > l:
-                cand = t[l:r+1]
-                arr = json.loads(cand)
-                if isinstance(arr, list) and len(arr) > 0:
-                    return [str(x).strip().strip('\"').strip("'") for x in arr if str(x).strip()]
-        except Exception:
-            pass
-        # 4. 逐行兜底
-        raw_lines = [ln for ln in t.splitlines() if ln.strip()]
-        cleaned: List[str] = []
-        for ln in raw_lines:
-            s = ln.strip()
-            if s in {"```", "```json", "[", "]", ",", "[,", "],"}: continue
-            s = s.lstrip("#").strip().strip("* ")
-            if s.endswith(","): s = s[:-1].strip()
-            if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
-                s = s[1:-1].strip()
-            s = s.lstrip("・-• 　").strip()
-            if re.match(r"^[*]*\\s*镜头\\s*\\d+", s):
-                continue
-            if s: cleaned.append(s)
-        return cleaned
+                storyboards = obj["storyboards"]
+                # 将 storyboards 转换为 scenes（每个 scene 10s）
+                scenes = []
+                current_scene = None
+                scene_idx = 1
+                clip_idx = 1
+                
+                for sb in storyboards:
+                    if not isinstance(sb, dict) or "desc" not in sb:
+                        continue
+                    
+                    begin_s = float(sb.get("begin_s", 0))
+                    end_s = float(sb.get("end_s", begin_s + 5.0))
+                    
+                    # 计算应该属于哪个 scene（每10s一个scene）
+                    scene_num = int(begin_s / 10.0) + 1
+                    
+                    if current_scene is None or current_scene["scene_idx"] != scene_num:
+                        # 开始新 scene
+                        if current_scene is not None:
+                            scenes.append(current_scene)
+                        scene_begin = (scene_num - 1) * 10.0
+                        current_scene = {
+                            "scene_idx": scene_num,
+                            "begin_s": scene_begin,
+                            "end_s": scene_begin + 10.0,
+                            "clips": []
+                        }
+                        clip_idx = 1
+                    
+                    # 添加 clip 到当前 scene
+                    current_scene["clips"].append({
+                        "idx": clip_idx,
+                        "desc": str(sb["desc"]).strip(),
+                        "begin_s": begin_s,
+                        "end_s": end_s
+                    })
+                    clip_idx += 1
+                
+                if current_scene is not None:
+                    scenes.append(current_scene)
+                
+                if scenes:
+                    logger.info(f"[plan_storyboard_impl] Converted {len(storyboards)} storyboards to {len(scenes)} scenes")
+                    return {"scenes": scenes}
+        except Exception as e:
+            logger.debug(f"[plan_storyboard_impl] Failed to parse storyboards format: {e}")
+        
+        return None
     
-    def _is_valid(desc: str) -> bool:
-        if not desc or len(desc) < 8: return False
-        bad_tokens = ["镜头描述", "请填写", "占位", "placeholder"]
-        return not any(bt in desc for bt in bad_tokens)
-    
-    lines = _extract_lines(outline)
-    try:
-        logger.info(f"[plan_storyboard_impl] parsed_lines(n={len(lines)}): {lines}")
-    except Exception:
-        pass
-    
-    # 校验：若为空或包含占位，自动重试一次，要求返回有效 JSON 对象
-    needs_retry = (len(lines) < num_clips) or any(not _is_valid(s) for s in lines)
-    if needs_retry:
+    scenes_data = _extract_scenes(outline)
+    # 如果没有成功解析 scenes，尝试重试
+    if not scenes_data or not scenes_data.get("scenes"):
+        logger.warning(f"[plan_storyboard_impl] Failed to parse scenes, retrying...")
         repair_system = (
             "你是严格的格式化助手。仅输出 JSON 对象，不要任何说明或 Markdown。\n"
-            "JSON 结构：{\"storyboards\": [{\"idx\": 1, \"desc\": \"…\"}, ...]}。\n"
-            "desc 必须是具体镜头画面描述，禁止出现‘镜头描述/占位/示例’等空泛内容。"
+            "JSON 结构：{\"scenes\": [{\"scene_idx\": 1, \"clips\": [{\"idx\": 1, \"desc\": \"…\", \"begin_s\": 0.0, \"end_s\": 3.0}, ...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}。\n"
+            "每个 scene 必须恰好10秒，包含多个 clips。desc 必须是具体镜头画面描述，禁止出现'镜头描述/占位/示例'等空泛内容。"
         )
         repair_user = (
-            f"请为 {num_clips} 个镜头生成中文分镜描述（每句20-50字）。\n"
-            f"主体目标：{goal}\n风格：{', '.join(styles) if styles else '通用'}\n总时长：{total_duration}s\n\n"
-            "返回示例：{\"storyboards\": [{\"idx\":1,\"desc\":\"…\"},{\"idx\":2,\"desc\":\"…\"}]}"
+            f"请为 {num_scenes} 个场景生成分镜脚本，每个场景恰好10秒，包含多个镜头。\n"
+            f"主体目标：{goal}\n风格：{', '.join(styles) if styles else '通用'}\n总时长：{total_duration}秒\n\n"
+            f"必须返回 {num_scenes} 个场景，每个场景恰好10秒。"
         )
         try:
             repair = await or_client.chat_completions(
@@ -685,71 +743,112 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
                 temperature=0.3,
                 max_tokens=calculated_max_tokens,
             )
-            lines2 = _extract_lines(repair)
-            if lines2:
-                lines = lines2
-                logger.info(f"[plan_storyboard_impl] retry_lines(n={len(lines)}): {lines}")
+            scenes_data = _extract_scenes(repair)
+            if scenes_data and scenes_data.get("scenes"):
+                logger.info(f"[plan_storyboard_impl] Retry successful, got {len(scenes_data['scenes'])} scenes")
         except Exception as e:
-            logger.warning(f"[plan_storyboard_impl] retry failed: {e}")
-
-    # 清理空字符串和无效描述
-    lines = [line.strip() for line in lines if line and line.strip() and len(line.strip()) >= 3]
-
-    if len(lines) < num_clips:
-        # 如果仍然不足，使用更具体的占位符，但标记为需要修复
-        missing = num_clips - len(lines)
-        logger.warning(f"[plan_storyboard_impl] Only got {len(lines)} valid descriptions, need {num_clips}, adding {missing} placeholders")
-        # 使用更具体的占位符，避免被误判为有效
-        for i in range(missing):
-            lines.append(f"镜头{len(lines) + 1}描述待生成")
-    # 不在这里截断，让审核工具检查数量并触发重写
-    if len(lines) > num_clips:
-        logger.warning(f"[plan_storyboard_impl] Got {len(lines)} descriptions, but only need {num_clips}, will be checked by review tool")
+            logger.warning(f"[plan_storyboard_impl] Retry failed: {e}")
     
-    # 计算时间分段，确保每个镜头不超过10s
-    def _split_with_max_duration(total: float, max_duration: float = 10.0):
-        """将总时长分割为多个镜头，每个镜头最长不超过 max_duration"""
-        res = []
-        t = 0.0
-        idx = 1
-        while t < total:
-            start = round(t, 1)
-            # 每个镜头最多10s，但如果剩余时间不足10s，则使用剩余时间
-            duration = min(max_duration, round(total - t, 1))
-            end = round(start + duration, 1)
-            res.append((start, end))
-            t = end
-            idx += 1
-        return res
+    # 如果仍然没有 scenes，创建默认结构
+    if not scenes_data or not scenes_data.get("scenes"):
+        logger.warning(f"[plan_storyboard_impl] Failed to parse scenes after retry, creating default structure")
+        scenes = []
+        for i in range(num_scenes):
+            scene_begin = i * 10.0
+            scenes.append({
+                "scene_idx": i + 1,
+                "begin_s": scene_begin,
+                "end_s": scene_begin + 10.0,
+                "clips": [
+                    {
+                        "idx": 1,
+                        "desc": f"场景{i+1}镜头描述待生成",
+                        "begin_s": scene_begin,
+                        "end_s": scene_begin + 10.0
+                    }
+                ]
+            })
+        scenes_data = {"scenes": scenes}
     
-    spans = _split_with_max_duration(total_duration, max_duration=10.0)
-    # 更新 num_clips 为实际生成的镜头数（可能比用户指定的多，因为每个镜头最多10s）
-    actual_num_clips = len(spans)
-    if actual_num_clips != num_clips:
-        logger.info(
-            f"[plan_storyboard_impl] Adjusted num_clips from {num_clips} to {actual_num_clips} "
-            f"to ensure each clip <= 10s (total_duration={total_duration}s)"
-        )
+    # 验证和修复 scenes
+    scenes = scenes_data["scenes"]
+    validated_scenes = []
     
-    # 构建 JSON 格式的分镜脚本
-    import json
-    storyboards = []
-    for i, (beg, end) in enumerate(spans):
-        desc = lines[i] if i < len(lines) else f"镜头{i + 1}描述待生成"
-        # 确保 desc 不为空且长度足够
-        desc = desc.strip() if desc else f"镜头{i + 1}描述待生成"
-        if not desc or len(desc) < 3:
-            desc = f"镜头{i + 1}描述待生成"
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        scene_idx = scene.get("scene_idx", len(validated_scenes) + 1)
+        scene_begin = float(scene.get("begin_s", (scene_idx - 1) * 10.0))
+        scene_end = float(scene.get("end_s", scene_begin + 10.0))
+        clips = scene.get("clips", [])
         
-        storyboards.append({
-            "idx": i + 1,
-            "desc": desc,
-            "begin_s": beg,
-            "end_s": end,
-            "keyframes": {"in": None, "out": None}
+        # 确保 scene 时长恰好为10s
+        if abs(scene_end - scene_begin - 10.0) > 0.1:
+            scene_end = scene_begin + 10.0
+        
+        # 验证和修复 clips
+        validated_clips = []
+        clip_idx = 1
+        for clip in clips:
+            if not isinstance(clip, dict) or not clip.get("desc"):
+                continue
+            desc = str(clip.get("desc", "")).strip()
+            if len(desc) < 8 or any(bt in desc for bt in ["镜头描述", "请填写", "占位", "placeholder", "描述待生成"]):
+                continue
+            
+            clip_begin = float(clip.get("begin_s", scene_begin))
+            clip_end = float(clip.get("end_s", clip_begin + 3.0))
+            
+            # 确保 clip 时间在 scene 范围内
+            clip_begin = max(scene_begin, min(clip_begin, scene_end))
+            clip_end = max(clip_begin + 0.1, min(clip_end, scene_end))
+            
+            validated_clips.append({
+                "idx": clip_idx,
+                "desc": desc,
+                "begin_s": clip_begin,
+                "end_s": clip_end
+            })
+            clip_idx += 1
+        
+        # 如果 scene 没有有效 clips，创建一个默认的
+        if not validated_clips:
+            validated_clips.append({
+                "idx": 1,
+                "desc": f"场景{scene_idx}镜头描述待生成",
+                "begin_s": scene_begin,
+                "end_s": scene_end
+            })
+        
+        validated_scenes.append({
+            "scene_idx": scene_idx,
+            "begin_s": scene_begin,
+            "end_s": scene_end,
+            "clips": validated_clips
         })
     
-    return json.dumps(storyboards, ensure_ascii=False)
+    # 确保有足够的 scenes
+    while len(validated_scenes) < num_scenes:
+        scene_idx = len(validated_scenes) + 1
+        scene_begin = (scene_idx - 1) * 10.0
+        validated_scenes.append({
+            "scene_idx": scene_idx,
+            "begin_s": scene_begin,
+            "end_s": scene_begin + 10.0,
+            "clips": [{
+                "idx": 1,
+                "desc": f"场景{scene_idx}镜头描述待生成",
+                "begin_s": scene_begin,
+                "end_s": scene_begin + 10.0
+            }]
+        })
+    
+    # 只保留需要的 scenes
+    validated_scenes = validated_scenes[:num_scenes]
+    
+    logger.info(f"[plan_storyboard_impl] Generated {len(validated_scenes)} scenes with {sum(len(s['clips']) for s in validated_scenes)} total clips")
+    
+    return json.dumps({"scenes": validated_scenes}, ensure_ascii=False)
 
 
 @tool("审核分镜脚本工具")
@@ -790,69 +889,111 @@ def review_storyboard_tool(storyboards_json: str, num_clips: int, goal: str, sty
     
     logger = logging.getLogger("crewai_tools")
     
-    # 解析并验证分镜脚本
+    # 解析并验证分镜脚本（支持 scene 结构）
     from typing import Tuple
     def validate_storyboards(sb_json: str) -> Tuple[bool, list, int]:
-        """验证分镜脚本，返回 (是否有效, 错误列表, 有效数量)"""
+        """验证分镜脚本（scene 结构），返回 (是否有效, 错误列表, 有效数量)"""
         try:
-            storyboards = json.loads(sb_json)
+            storyboards_data = json.loads(sb_json)
         except Exception as e:
             return False, [f"JSON 解析失败: {e}"], 0
         
-        if not isinstance(storyboards, list):
-            return False, ["分镜脚本必须是数组格式"], 0
+        # 支持 scene 结构
+        scenes = []
+        if isinstance(storyboards_data, dict) and "scenes" in storyboards_data:
+            scenes = storyboards_data["scenes"]
+        elif isinstance(storyboards_data, list):
+            # 兼容旧格式：如果是列表，假设是 scenes
+            scenes = storyboards_data
+        else:
+            return False, ["分镜脚本必须是包含 scenes 的对象格式或 scenes 数组"], 0
+        
+        if not isinstance(scenes, list) or len(scenes) == 0:
+            return False, ["scenes 数组为空，至少需要1个场景"], 0
         
         errors = []
-        valid_count = 0
+        valid_scene_count = 0
+        total_clips = 0
         
-        # 检查每个分镜
-        for i, sb in enumerate(storyboards):
-            if not isinstance(sb, dict):
-                errors.append(f"镜头 {i + 1}: 不是有效的对象格式")
+        # 检查每个 scene
+        for scene_idx, scene in enumerate(scenes):
+            if not isinstance(scene, dict):
+                errors.append(f"场景 {scene_idx + 1}: 不是有效的对象格式")
                 continue
             
-            desc = str(sb.get("desc", "")).strip()
-            idx = sb.get("idx", i + 1)
-            begin_s = float(sb.get("begin_s", 0))
-            end_s = float(sb.get("end_s", 0))
-            duration = end_s - begin_s
+            scene_num = scene.get("scene_idx", scene_idx + 1)
+            scene_begin = float(scene.get("begin_s", (scene_num - 1) * 10.0))
+            scene_end = float(scene.get("end_s", scene_begin + 10.0))
+            scene_duration = scene_end - scene_begin
+            clips = scene.get("clips", [])
             
-            # 检查描述是否为空
-            if not desc:
-                errors.append(f"镜头 {idx}: 描述为空")
+            # 检查 scene 时长是否恰好为10s
+            if abs(scene_duration - 10.0) > 0.1:
+                errors.append(f"场景 {scene_num}: 时长不是10s（{scene_duration:.1f}s），每个场景必须恰好10秒")
                 continue
             
-            # 检查描述是否过短（至少 8 个字符）
-            if len(desc) < 8:
-                errors.append(f"镜头 {idx}: 描述过短（长度: {len(desc)}），至少需要 8 个字符")
+            # 检查 clips
+            if not isinstance(clips, list) or len(clips) == 0:
+                errors.append(f"场景 {scene_num}: 没有镜头（clips）")
                 continue
             
-            # 检查是否包含占位符
-            placeholder_keywords = ["镜头描述", "描述待生成", "请填写", "占位", "placeholder", "待生成"]
-            if any(keyword in desc for keyword in placeholder_keywords):
-                errors.append(f"镜头 {idx}: 包含占位符（'{desc[:30]}...'）")
-                continue
+            scene_valid = True
+            for clip_idx, clip in enumerate(clips):
+                if not isinstance(clip, dict):
+                    errors.append(f"场景 {scene_num} 镜头 {clip_idx + 1}: 不是有效的对象格式")
+                    scene_valid = False
+                    continue
+                
+                desc = str(clip.get("desc", "")).strip()
+                clip_num = clip.get("idx", clip_idx + 1)
+                clip_begin = float(clip.get("begin_s", scene_begin))
+                clip_end = float(clip.get("end_s", clip_begin + 3.0))
+                clip_duration = clip_end - clip_begin
+                
+                # 检查描述是否为空
+                if not desc:
+                    errors.append(f"场景 {scene_num} 镜头 {clip_num}: 描述为空")
+                    scene_valid = False
+                    continue
+                
+                # 检查描述是否过短（至少 8 个字符）
+                if len(desc) < 8:
+                    errors.append(f"场景 {scene_num} 镜头 {clip_num}: 描述过短（长度: {len(desc)}），至少需要 8 个字符")
+                    scene_valid = False
+                    continue
+                
+                # 检查是否包含占位符
+                placeholder_keywords = ["镜头描述", "描述待生成", "请填写", "占位", "placeholder", "待生成"]
+                if any(keyword in desc for keyword in placeholder_keywords):
+                    errors.append(f"场景 {scene_num} 镜头 {clip_num}: 包含占位符（'{desc[:30]}...'）")
+                    scene_valid = False
+                    continue
+                
+                # 检查时长是否超过10s
+                if clip_duration > 10.0:
+                    errors.append(f"场景 {scene_num} 镜头 {clip_num}: 时长超过10s（{clip_duration:.1f}s），每个镜头最长不超过10s")
+                    scene_valid = False
+                    continue
+                
+                # 检查 clip 时间是否在 scene 范围内
+                if clip_begin < scene_begin or clip_end > scene_end:
+                    errors.append(f"场景 {scene_num} 镜头 {clip_num}: 时间超出场景范围（{clip_begin:.1f}s-{clip_end:.1f}s 不在 {scene_begin:.1f}s-{scene_end:.1f}s 内）")
+                    scene_valid = False
+                    continue
+                
+                total_clips += 1
             
-            # 检查时长是否超过10s
-            if duration > 10.0:
-                errors.append(f"镜头 {idx}: 时长超过10s（{duration:.1f}s），每个镜头最长不超过10s")
-                continue
-            
-            valid_count += 1
-        
-        # 检查数量（不再严格限制，因为镜头数量会根据时长自动调整）
-        # 但确保至少有一个有效镜头
-        if len(storyboards) == 0:
-            errors.append("镜头数量为0，至少需要1个镜头")
+            if scene_valid:
+                valid_scene_count += 1
         
         # 检查总时长是否匹配
-        total_actual_duration = sum([float(sb.get("end_s", 0)) - float(sb.get("begin_s", 0)) for sb in storyboards])
-        if abs(total_actual_duration - total_duration) > 1.0:  # 允许1秒误差
-            errors.append(f"总时长不匹配：期望 {total_duration}s，实际 {total_actual_duration:.1f}s")
+        expected_scenes = max(1, int(total_duration / 10.0) + (1 if total_duration % 10.0 > 0 else 0))
+        if len(scenes) != expected_scenes:
+            errors.append(f"场景数量不匹配：期望 {expected_scenes} 个场景，实际 {len(scenes)} 个")
         
-        # 必须所有镜头都有效（不再要求数量完全匹配）
-        is_valid = len(errors) == 0 and valid_count == len(storyboards) and len(storyboards) > 0
-        return is_valid, errors, valid_count
+        # 必须所有 scene 都有效，且至少有一个有效镜头
+        is_valid = len(errors) == 0 and valid_scene_count == len(scenes) and total_clips > 0
+        return is_valid, errors, total_clips
     
     # 首次验证
     is_valid, errors, valid_count = validate_storyboards(storyboards_json)
@@ -907,14 +1048,14 @@ def plan_storyboard_tool(goal: str, styles: List[str], total_duration: float, nu
 @tool("生成关键帧工具")
 def generate_keyframe_tool(storyboards_json: str, image_control: bool = True) -> str:
     """
-    为分镜脚本生成关键帧图片（首帧/尾帧）。
+    为分镜脚本生成关键帧图片（首帧/尾帧）或为 scene 生成预览图片。
     
     Args:
-        storyboards_json: JSON 格式的分镜脚本列表
+        storyboards_json: JSON 格式的分镜脚本（支持 scene 结构或旧格式）
         image_control: 是否启用图片控制
         
     Returns:
-        JSON 格式的更新后的分镜脚本（包含关键帧 URL）
+        JSON 格式的更新后的分镜脚本（包含关键帧 URL 或 scene 图片 URL）
     """
     import json
     import asyncio
@@ -922,27 +1063,61 @@ def generate_keyframe_tool(storyboards_json: str, image_control: bool = True) ->
     
     logger = logging.getLogger("crewai_tools")
     
-    if not image_control:
+    # 即使 image_control=False，如果是 scene 结构，也生成图片（用于前端展示）
+    data = json.loads(storyboards_json)
+    
+    # 检查是否是 scene 结构
+    is_scene_structure = isinstance(data, dict) and "scenes" in data
+    
+    # 如果是 scene 结构，总是生成图片（用于前端展示）
+    if not image_control and not is_scene_structure:
         return storyboards_json
     
-    storyboards = json.loads(storyboards_json)
     image_provider = _get_image_provider()
     
     async def generate_keyframes():
-        updated_storyboards = []
-        for sb in storyboards:
-            desc = sb.get("desc", "")
-            # 为每个分镜生成首帧和尾帧
-            try:
-                in_frame_url = await image_provider.generate(f"{desc}，首帧画面")
-                out_frame_url = await image_provider.generate(f"{desc}，尾帧画面")
-                sb["keyframes"] = {"in": in_frame_url, "out": out_frame_url}
-            except Exception as e:
-                logger.warning(f"[generate_keyframe_tool] Failed to generate keyframes for clip {sb.get('idx', 'unknown')}: {e}")
-                # 失败时保留原有 keyframes
-                sb["keyframes"] = sb.get("keyframes", {"in": None, "out": None})
-            updated_storyboards.append(sb)
-        return json.dumps(updated_storyboards, ensure_ascii=False)
+        # 检查是否是 scene 结构
+        if isinstance(data, dict) and "scenes" in data:
+            # 新格式：scene 结构，为每个 scene 生成一张预览图片
+            scenes = data["scenes"]
+            updated_scenes = []
+            for scene in scenes:
+                scene_idx = scene.get("scene_idx", 1)
+                clips = scene.get("clips", [])
+                # 合并所有 clips 的描述作为 scene 的描述
+                scene_desc = "；".join([clip.get("desc", "") for clip in clips if clip.get("desc")])
+                if not scene_desc:
+                    scene_desc = f"场景{scene_idx}"
+                
+                try:
+                    # 为 scene 生成一张代表性图片
+                    image_url = await image_provider.generate(f"{scene_desc}，视频场景画面")
+                    scene["image_url"] = image_url
+                    logger.info(f"[generate_keyframe_tool] Generated image for scene {scene_idx}: {image_url}")
+                except Exception as e:
+                    logger.warning(f"[generate_keyframe_tool] Failed to generate image for scene {scene_idx}: {e}")
+                    scene["image_url"] = None
+                updated_scenes.append(scene)
+            return json.dumps({"scenes": updated_scenes}, ensure_ascii=False)
+        elif isinstance(data, list):
+            # 旧格式：storyboards 列表，为每个分镜生成首帧和尾帧
+            updated_storyboards = []
+            for sb in data:
+                desc = sb.get("desc", "")
+                # 为每个分镜生成首帧和尾帧
+                try:
+                    in_frame_url = await image_provider.generate(f"{desc}，首帧画面")
+                    out_frame_url = await image_provider.generate(f"{desc}，尾帧画面")
+                    sb["keyframes"] = {"in": in_frame_url, "out": out_frame_url}
+                except Exception as e:
+                    logger.warning(f"[generate_keyframe_tool] Failed to generate keyframes for clip {sb.get('idx', 'unknown')}: {e}")
+                    # 失败时保留原有 keyframes
+                    sb["keyframes"] = sb.get("keyframes", {"in": None, "out": None})
+                updated_storyboards.append(sb)
+            return json.dumps(updated_storyboards, ensure_ascii=False)
+        else:
+            logger.warning(f"[generate_keyframe_tool] Unknown format, returning original")
+            return storyboards_json
     
     return _run_async_safe(generate_keyframes())
 
@@ -950,21 +1125,20 @@ def generate_keyframe_tool(storyboards_json: str, image_control: bool = True) ->
 @tool("合并镜头为视频任务工具")
 def merge_storyboards_to_video_tasks_tool(storyboards_json: str, run_id: str, total_duration: float) -> str:
     """
-    将分镜脚本按时间顺序合并为10s的视频任务（为了节约成本）。
+    将分镜脚本（scene 结构）转换为视频任务。
     
     规则：
-    1. 按时间顺序（begin_s）处理镜头
-    2. 将不足10s的镜头合并，直到累计时长达到10s
-    3. 每个视频任务最多10s，如果单个镜头超过10s，则单独成为一个任务
-    4. 保留 clips 数组，不合并描述，以便后续进行细节控制
+    1. 每个 scene 恰好10秒，直接作为一个视频任务
+    2. 使用 scene 的描述结构（scene 内所有 clips 的描述）
+    3. 每个视频任务对应一个 scene
     
     Args:
-        storyboards_json: JSON 格式的分镜脚本列表
+        storyboards_json: JSON 格式的分镜脚本（包含 scenes 数组）
         run_id: 运行 ID
         total_duration: 总时长（秒）
         
     Returns:
-        JSON 格式的视频任务列表（每个任务包含 clips 数组，每个任务对应一个10s的视频片段）
+        JSON 格式的视频任务列表（每个任务对应一个 scene，每个 scene 恰好10s）
     """
     import json
     import logging
@@ -977,130 +1151,65 @@ def merge_storyboards_to_video_tasks_tool(storyboards_json: str, run_id: str, to
         logger.error(f"[merge_storyboards_to_video_tasks_tool] Failed to parse JSON: {e}")
         return json.dumps([], ensure_ascii=False)
     
-    # 处理不同的输入格式
-    if isinstance(storyboards_raw, dict):
-        storyboards = []
-        import re
-        sorted_keys = sorted(
-            [k for k in storyboards_raw.keys() if "镜头" in str(k) or k.isdigit()], 
-            key=lambda x: int(re.search(r'\d+', str(x)).group()) if re.search(r'\d+', str(x)) else 999
-        )
-        for idx, key in enumerate(sorted_keys, 1):
-            item = storyboards_raw[key]
-            if isinstance(item, dict):
-                desc = item.get("内容") or item.get("desc") or item.get("描述") or ""
-                storyboards.append({
-                    "idx": idx,
-                    "desc": str(desc).strip(),
-                    "begin_s": item.get("begin_s", 0),
-                    "end_s": item.get("end_s", 0),
-                    "keyframes": item.get("keyframes", {"in": None, "out": None})
-                })
+    # 处理 scene 结构
+    scenes = []
+    if isinstance(storyboards_raw, dict) and "scenes" in storyboards_raw:
+        scenes = storyboards_raw["scenes"]
     elif isinstance(storyboards_raw, list):
-        storyboards = storyboards_raw
+        # 兼容旧格式：如果是列表，假设是 scenes
+        scenes = storyboards_raw
     else:
-        logger.error(f"[merge_storyboards_to_video_tasks_tool] Invalid format: {type(storyboards_raw)}")
+        logger.error(f"[merge_storyboards_to_video_tasks_tool] Invalid format: expected scenes structure, got {type(storyboards_raw)}")
         return json.dumps([], ensure_ascii=False)
     
-    # 按 begin_s 排序
-    storyboards.sort(key=lambda x: float(x.get("begin_s", 0)))
+    # 按 scene_idx 排序
+    scenes.sort(key=lambda x: int(x.get("scene_idx", 0)))
     
-    # 合并镜头为10s的视频任务
+    # 每个 scene 转换为一个视频任务
     video_tasks = []
-    current_task = {
-        "task_idx": 0,
-        "clips": [],
-        "total_duration": 0.0,
-        "begin_s": 0.0,
-        "end_s": 0.0
-    }
-    
-    TARGET_DURATION = 10.0  # 每个视频任务的目标时长
-    
-    for sb in storyboards:
-        begin_s = float(sb.get("begin_s", 0))
-        end_s = float(sb.get("end_s", 0))
-        duration = max(0.1, end_s - begin_s)
-        desc = str(sb.get("desc", "")).strip() or str(sb.get("内容", "")).strip() or str(sb.get("描述", "")).strip()
+    for scene in scenes:
+        scene_idx = scene.get("scene_idx", len(video_tasks) + 1)
+        scene_begin = float(scene.get("begin_s", (scene_idx - 1) * 10.0))
+        scene_end = float(scene.get("end_s", scene_begin + 10.0))
+        clips = scene.get("clips", [])
         
-        if not desc or len(desc) < 3:
-            logger.warning(f"[merge_storyboards_to_video_tasks_tool] Skipping empty clip at {begin_s}-{end_s}s")
-            continue
+        # 确保 scene 时长恰好为10s
+        if abs(scene_end - scene_begin - 10.0) > 0.1:
+            scene_end = scene_begin + 10.0
         
-        # 如果单个镜头超过10s，单独成为一个任务
-        if duration >= TARGET_DURATION:
-            # 先保存当前任务（如果有）
-            if current_task["clips"]:
-                video_tasks.append({
-                    "task_idx": len(video_tasks) + 1,
-                    "clips": current_task["clips"].copy(),
-                    "total_duration": current_task["total_duration"],
-                    "begin_s": current_task["begin_s"],
-                    "end_s": current_task["end_s"],
-                    "keyframes": current_task["clips"][0].get("keyframes", {"in": None, "out": None})
-                })
-                current_task = {
-                    "task_idx": 0,
-                    "clips": [],
-                    "total_duration": 0.0,
-                    "begin_s": 0.0,
-                    "end_s": 0.0
-                }
-            
-            # 这个长镜头单独成为一个任务
-            video_tasks.append({
-                "task_idx": len(video_tasks) + 1,
-                "clips": [sb],
-                "total_duration": duration,
-                "begin_s": begin_s,
-                "end_s": end_s,
-                "keyframes": sb.get("keyframes", {"in": None, "out": None})
-            })
-        else:
-            # 尝试添加到当前任务
-            new_total = current_task["total_duration"] + duration
-            
-            if new_total <= TARGET_DURATION:
-                # 可以添加到当前任务
-                if not current_task["clips"]:
-                    current_task["begin_s"] = begin_s
-                current_task["clips"].append(sb)
-                current_task["total_duration"] = new_total
-                current_task["end_s"] = end_s
-            else:
-                # 当前任务已满，先保存
-                if current_task["clips"]:
-                    video_tasks.append({
-                        "task_idx": len(video_tasks) + 1,
-                        "clips": current_task["clips"].copy(),
-                        "total_duration": current_task["total_duration"],
-                        "begin_s": current_task["begin_s"],
-                        "end_s": current_task["end_s"],
-                        "keyframes": current_task["clips"][0].get("keyframes", {"in": None, "out": None})
-                    })
-                
-                # 开始新任务
-                current_task = {
-                    "task_idx": 0,
-                    "clips": [sb],
-                    "total_duration": duration,
-                    "begin_s": begin_s,
-                    "end_s": end_s
-                }
-    
-    # 保存最后一个任务（如果有）
-    if current_task["clips"]:
+        # 构建 scene 的描述：合并所有 clips 的描述
+        clip_descriptions = []
+        for clip in clips:
+            if isinstance(clip, dict) and clip.get("desc"):
+                desc = str(clip.get("desc", "")).strip()
+                if desc and len(desc) >= 3:
+                    clip_descriptions.append(desc)
+        
+        # 如果没有有效的描述，使用默认描述
+        if not clip_descriptions:
+            clip_descriptions = [f"场景{scene_idx}视频内容"]
+        
+        # 合并描述（用分号连接）
+        scene_desc = "；".join(clip_descriptions)
+        
+        # 获取关键帧（使用第一个 clip 的关键帧）
+        keyframes = {"in": None, "out": None}
+        if clips and isinstance(clips[0], dict):
+            keyframes = clips[0].get("keyframes", keyframes)
+        
         video_tasks.append({
-            "task_idx": len(video_tasks) + 1,
-            "clips": current_task["clips"].copy(),
-            "total_duration": current_task["total_duration"],
-            "begin_s": current_task["begin_s"],
-            "end_s": current_task["end_s"],
-            "keyframes": current_task["clips"][0].get("keyframes", {"in": None, "out": None})
+            "task_idx": scene_idx,  # 使用 scene_idx 作为 task_idx
+            "scene_idx": scene_idx,
+            "desc": scene_desc,
+            "clips": clips,  # 保留所有 clips 信息
+            "total_duration": 10.0,  # 每个 scene 恰好10s
+            "begin_s": scene_begin,
+            "end_s": scene_end,
+            "keyframes": keyframes
         })
     
     logger.info(
-        f"[merge_storyboards_to_video_tasks_tool] Merged {len(storyboards)} clips into {len(video_tasks)} video tasks "
+        f"[merge_storyboards_to_video_tasks_tool] Converted {len(scenes)} scenes into {len(video_tasks)} video tasks "
         f"(target: {total_duration}s, actual: {sum(t['total_duration'] for t in video_tasks):.1f}s)"
     )
     
@@ -1129,7 +1238,20 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
     
     logger = logging.getLogger("crewai_tools")
     video_tasks_raw = json.loads(video_tasks_json)
-    video_provider = _get_video_provider()
+    
+    # 记录视频提供商信息
+    try:
+        video_provider = _get_video_provider()
+        provider_type = type(video_provider).__name__
+        logger.info(
+            f"[generate_video_clip_tool] Video provider initialized: "
+            f"type={provider_type}, "
+            f"video_tasks_count={len(video_tasks_raw) if isinstance(video_tasks_raw, list) else 0}, "
+            f"run_id={run_id}"
+        )
+    except Exception as e:
+        logger.error(f"[generate_video_clip_tool] Failed to get video provider: {e}", exc_info=True)
+        raise
     
     # 处理输入格式
     if isinstance(video_tasks_raw, list):
@@ -1148,50 +1270,35 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
             except (ValueError, TypeError):
                 task_idx = index + 1
         
-        # 获取 clips 数组（保留所有镜头信息，不合并）
+        # 优先使用 scene 的描述（desc），这是合并了所有 clips 的描述
+        scene_desc = task.get("desc", "").strip()
         clips = task.get("clips", [])
-        if not clips:
-            # 降级：如果没有 clips，尝试使用 desc
-            desc = str(task.get("desc", "")).strip()
-            if desc:
-                clips = [{"desc": desc, "begin_s": task.get("begin_s", 0), "end_s": task.get("end_s", 10)}]
-            else:
-                error_msg = f"视频任务 {task_idx} 没有 clips 或 desc，无法生成视频"
-                logger.error(f"[generate_video_clip_tool] {error_msg}")
-                return {
-                    "task_idx": task_idx,
-                    "status": "failed",
-                    "video_url": None,
-                    "error": error_msg
-                }
         
-        # 将 clips 转换为结构化的 prompt（按时间顺序，包含每个镜头的描述和时长）
-        # 格式：每个镜头一行，包含时间范围和描述
-        prompt_parts = []
-        for clip in clips:
-            clip_desc = str(clip.get("desc", "")).strip() or str(clip.get("内容", "")).strip() or str(clip.get("描述", "")).strip()
-            if not clip_desc:
-                continue
-            begin_s = float(clip.get("begin_s", 0))
-            end_s = float(clip.get("end_s", 0))
-            clip_duration = end_s - begin_s
-            # 格式：时间范围 + 描述
-            prompt_parts.append(f"[{begin_s:.1f}s-{end_s:.1f}s, {clip_duration:.1f}s] {clip_desc}")
+        if scene_desc and len(scene_desc) >= 3:
+            # 使用 scene 的描述（已经在 merge_storyboards_to_video_tasks_tool 中合并了所有 clips）
+            prompt = scene_desc
+        elif clips and isinstance(clips, list) and len(clips) > 0:
+            # 如果没有 scene 描述，合并所有 clips 的描述（用分号连接）
+            clip_descriptions = []
+            for clip in clips:
+                if isinstance(clip, dict):
+                    clip_desc = str(clip.get("desc", "")).strip()
+                    if clip_desc and len(clip_desc) >= 3:
+                        clip_descriptions.append(clip_desc)
+            prompt = "；".join(clip_descriptions) if clip_descriptions else f"场景{task_idx}视频内容"
+        else:
+            # 降级：如果都没有，使用默认描述
+            prompt = f"场景{task_idx}视频内容"
+            logger.warning(f"[generate_video_clip_tool] Task {task_idx} has no desc or clips, using default prompt")
         
-        # 组合成完整的 prompt
-        prompt = "\n".join(prompt_parts) if prompt_parts else ""
-        
-        # 如果没有有效的 prompt，尝试使用第一个 clip 的描述
-        if not prompt or len(prompt) < 3:
-            first_clip = clips[0] if clips else {}
-            prompt = str(first_clip.get("desc", "")).strip() or str(first_clip.get("内容", "")).strip() or str(first_clip.get("描述", "")).strip()
-        
-        # 获取时长（应该是10s或更少）
+        # 获取时长（每个 scene 恰好10s）
         duration = max(1, min(10, int(round(task.get("total_duration", 10.0)))))
         
-        # 获取关键帧（使用第一个镜头的关键帧）
-        first_clip = clips[0] if clips else {}
-        keyframes = first_clip.get("keyframes", task.get("keyframes", {}))
+        # 获取关键帧（使用第一个 clip 的关键帧，或 scene 的关键帧）
+        keyframes = task.get("keyframes", {})
+        if clips and isinstance(clips, list) and len(clips) > 0:
+            first_clip = clips[0] if isinstance(clips[0], dict) else {}
+            keyframes = first_clip.get("keyframes", keyframes)
         ref_img = keyframes.get("in") if keyframes else None
         
         # 验证 prompt 是否为空或包含占位符
@@ -1258,7 +1365,21 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
             try:
                 # 提交视频生成任务（使用异步模式，避免长时间阻塞）
                 # 注意：由于视频生成需要 3-5 分钟，使用异步模式可以立即返回，避免阻塞 CrewAI
+                logger.info(
+                    f"[generate_video_clip_tool] Submitting video generation task: "
+                    f"task_idx={task_idx}, "
+                    f"prompt_length={len(prompt)}, "
+                    f"has_ref_img={bool(ref_img)}, "
+                    f"duration={duration}, "
+                    f"provider_type={type(video_provider).__name__}"
+                )
                 res = await video_provider.generate(prompt, ref_img or "", duration=duration, async_mode=True)
+                logger.info(
+                    f"[generate_video_clip_tool] Video provider response: "
+                    f"task_idx={task_idx}, "
+                    f"result_type={type(res)}, "
+                    f"result={res}"
+                )
                 
                 if isinstance(res, dict) and res.get("pending"):
                     # 异步任务模式：返回 task_id，等待 webhook 回调或后续轮询
@@ -1479,18 +1600,19 @@ def stitch_video_tool(clip_results_json: str, run_id: str) -> str:
     将多个视频片段拼接为最终视频。
     
     【重要】此工具的行为：
-    1. 如果视频片段状态为 "pending" 或 "submitted"，说明任务还在处理中，此时无法拼接。
-    2. 工具会抛出 RuntimeError 异常，明确说明任务还在处理中。
-    3. 系统会注册回调，当所有任务完成时自动触发拼接。
-    4. 只有在所有视频片段状态为 "succeeded" 时，才会返回最终视频的 CDN URL。
-    5. 如果工具抛出异常，调用者必须如实返回异常信息，不要自己生成或猜测 URL。
+    1. 首先检查 crew_sessions 表，如果 status 为 "completed" 且有 result，直接返回 result 字段的 URL。
+    2. 如果视频片段状态为 "pending" 或 "submitted"，说明任务还在处理中，此时无法拼接。
+    3. 工具会抛出 RuntimeError 异常，明确说明任务还在处理中。
+    4. 系统会注册回调，当所有任务完成时自动触发拼接。
+    5. 只有在所有视频片段状态为 "succeeded" 时，才会返回最终视频的 CDN URL。
+    6. 如果工具抛出异常，调用者必须如实返回异常信息，不要自己生成或猜测 URL。
     
     Args:
         clip_results_json: JSON 格式的视频片段结果列表
         run_id: 运行 ID，用于文件命名
         
     Returns:
-        最终视频的 CDN URL（仅当所有视频片段完成时）
+        最终视频的 CDN URL（仅当所有视频片段完成时，或从 crew_sessions 表获取）
         
     Raises:
         RuntimeError: 如果视频片段还在处理中（pending/submitted），会抛出异常，说明无法拼接。
@@ -1505,6 +1627,57 @@ def stitch_video_tool(clip_results_json: str, run_id: str) -> str:
     import os
     
     logger = logging.getLogger("crewai_tools")
+    
+    # 首先检查 crew_sessions 表，如果已经完成，直接返回 result
+    try:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+        if supabase_url and supabase_key:
+            from supabase import create_client
+            supabase = create_client(supabase_url, supabase_key)
+            
+            session_result = supabase.table("crew_sessions")\
+                .select("status, result")\
+                .eq("run_id", run_id)\
+                .execute()
+            
+            if session_result.data and len(session_result.data) > 0:
+                session = session_result.data[0]
+                status = session.get("status", "")
+                result = session.get("result", "")
+                
+                # 如果状态是 completed 且有 result，直接返回
+                if status == "completed" and result:
+                    logger.info(
+                        f"[stitch_video_tool] Found completed session in crew_sessions: "
+                        f"run_id={run_id}, result={result[:100]}"
+                    )
+                    return result
+                
+                # 如果状态是 stitching，说明正在拼接，等待完成
+                if status == "stitching":
+                    logger.info(
+                        f"[stitch_video_tool] Session is stitching, waiting for completion: run_id={run_id}"
+                    )
+                    # 等待一段时间后再次检查
+                    import time
+                    for _ in range(60):  # 最多等待 5 分钟（60 * 5秒）
+                        time.sleep(5)
+                        session_result = supabase.table("crew_sessions")\
+                            .select("status, result")\
+                            .eq("run_id", run_id)\
+                            .execute()
+                        if session_result.data and len(session_result.data) > 0:
+                            session = session_result.data[0]
+                            if session.get("status") == "completed" and session.get("result"):
+                                logger.info(
+                                    f"[stitch_video_tool] Stitch completed, got result: {session.get('result')[:100]}"
+                                )
+                                return session.get("result")
+    except Exception as e:
+        logger.debug(f"[stitch_video_tool] Failed to check crew_sessions: {e}")
+        # 继续执行，不阻塞
+    
     clip_results = json.loads(clip_results_json)
     
     # 检查是否有 pending 或 submitted 状态的任务，如果有，尝试轮询获取结果
