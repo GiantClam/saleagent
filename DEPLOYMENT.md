@@ -127,6 +127,14 @@ saleagent/
    - Railway 会自动检测 Dockerfile 并开始构建
    - 构建完成后会自动部署
 
+### 2.5 排错：Railpack/Nixpacks 构建失败
+
+- 错误提示：`Script start.sh not found` 或 `could not determine how to build`
+- 处理方式：
+  - 方案A（推荐）：在 Railway 服务设置中将 Root Directory 指向 `apps/agent`，并使用 Dockerfile 构建（builder 选择 Docker）。
+  - 方案B：使用 Nixpacks，设置 Start Command 为 `bash apps/agent/start.sh` 或 `uvicorn main:app --host 0.0.0.0 --port $PORT`。
+  - 方案C：服务根目录为 `apps/agent` 时，自动检测 `Procfile`：`web: uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}`。
+
 ### 2.3 获取部署 URL
 
 - Railway 会自动生成一个公共 URL，格式：`https://your-app.railway.app`
