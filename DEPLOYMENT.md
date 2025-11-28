@@ -187,6 +187,7 @@ saleagent/
 - [ ] Dockerfile 已检测
 - [ ] 环境变量已配置（见上方列表）
 - [ ] `CORS_ORIGIN` 设置为 Vercel 前端 URL
+- [ ] `GET /healthz` 探活返回 `{ ok: true }`
 - [ ] 构建成功
 - [ ] 服务运行正常
 - [ ] 公共 URL 已获取并配置到前端
@@ -280,12 +281,14 @@ saleagent/
 ## 10. 安全建议
 
 1. **环境变量**
-   - 不要在代码中硬编码敏感信息
-   - 使用平台的环境变量管理功能
-   - 定期轮换 API 密钥
+- 不要在代码中硬编码敏感信息
+- 使用平台的环境变量管理功能
+- 定期轮换 API 密钥
+ - 本仓库未硬编码密钥，敏感项仅存在于 `.env.example` 作为占位（如 `OPENROUTER_API_KEY`、`SUPABASE_SERVICE_ROLE_KEY`、`PIXVERSE_API_KEY`、`RUNNINGHUB_API_KEY`、`R2_SECRET_KEY`）。
+ - 前端仅使用 `NEXT_PUBLIC_*` 变量暴露非敏感值，服务端密钥仅在后端配置。
 
 2. **CORS**
-   - 限制 `CORS_ORIGIN` 为具体的域名，避免使用 `*`
+- 限制 `CORS_ORIGIN` 为具体的域名，避免使用 `*`
 
 3. **API 密钥**
    - 使用强密码和随机生成的 token

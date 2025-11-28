@@ -77,6 +77,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
 # 统一日志配置（stdout + 文件），确保 Railway 上可查看
 def _configure_logging():
     logger = logging.getLogger()
