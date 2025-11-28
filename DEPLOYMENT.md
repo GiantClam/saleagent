@@ -134,6 +134,7 @@ saleagent/
   - 方案A（推荐）：在 Railway 服务设置中将 Root Directory 指向 `apps/agent`，并使用 Dockerfile 构建（builder 选择 Docker）。
   - 方案B：使用 Nixpacks，设置 Start Command 为 `bash apps/agent/start.sh` 或 `uvicorn main:app --host 0.0.0.0 --port $PORT`。
   - 方案C：服务根目录为 `apps/agent` 时，自动检测 `Procfile`：`web: uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}`。
+  - 方案D：如果服务根目录无法指向子目录，仓库根已提供 `start.sh` 与 `railway.json`，Railpack 从根目录也能启动或选择 Docker 构建。
 
 ### 2.3 获取部署 URL
 
