@@ -192,6 +192,9 @@ saleagent/
 - [ ] 服务运行正常
 - [ ] 公共 URL 已获取并配置到前端
 
+### 禁用前端（生产）
+- 在前端平台设置 `DISABLE_FRONTEND=true`，Next.js 中间件将拦截并返回 404 提示页面。
+
 ### Cloudflare Worker（可选）
 - [ ] Worker 已部署
 - [ ] MailChannels 已配置
