@@ -216,10 +216,8 @@ async def events(prompt: str, img: str | None, thread_id: str, run_id: str):
         provider_url = provider_res.get("video_url") if isinstance(provider_res, dict) else provider_res
         # 4 上传到 R2（未配置则回退为 provider_url）
         cdn_url = await upload_url_to_r2(provider_url, f"{run_id}.mp4")
-        async for chunk in emit("VideoAgent", "tool_result", run_id, thread_id, delta=f"🎬 CDN 视频：{cdn_url}"):
-            yield chunk
 
-    # 完成
+    # 完成（精简事件：仅发送一次 run_finished，包含最终 URL）
     # 持久化成功并回传 share_slug
     share_slug = await persist_success(run_id, prompt, cover_url, cdn_url)
     if supabase:
@@ -233,7 +231,7 @@ async def events(prompt: str, img: str | None, thread_id: str, run_id: str):
                 p = supabase.table("profiles").select("email").eq("id", user_id).single().execute()
                 email = (p.data or {}).get("email") if p and p.data else None
         await send_email(email, "视频生成完成", f"您的视频已生成：{cdn_url}", f"<p>您的视频已生成：<a href='{cdn_url}'>{cdn_url}</a></p>")
-    async for chunk in emit("System", "run_finished", run_id, thread_id, delta="完成", progress={"current": 4, "total": 4}, payload={"share_slug": share_slug}):
+    async for chunk in emit("System", "run_finished", run_id, thread_id, delta=f"🎬 最终视频已生成：{cdn_url}", progress={"current": 4, "total": 4}, payload={"share_slug": share_slug, "video_url": cdn_url}):
         yield chunk
 
 # ======================
@@ -907,7 +905,9 @@ async def regenerate_scene(request: Request):
         # 生成图片
         scene_desc = "；".join([clip.get("desc", "") for clip in clips if clip.get("desc")])
         image_provider = get_image_provider()
-        image_url = await image_provider.generate(f"{scene_desc}，视频场景画面")
+        # 【重要】避免生成带有人脸的图片，因为 sora2 不支持使用真人图片作为参考
+        image_prompt = f"{scene_desc}，视频场景画面，无人脸、无真人，无人物形象"
+        image_url = await image_provider.generate(image_prompt)
         
         return {
             "message_id": message_id,
@@ -1098,16 +1098,11 @@ async def run_agent(request: Request):
                         video_url = url_match.group(0)
                         cdn_url = await upload_url_to_r2(video_url, f"{run_id}.mp4")
                         
-                        async for chunk in emit("剪辑", "tool_result", run_id, thread_id, 
-                                               delta=f"🎬 最终视频已生成：{cdn_url}", 
-                                               progress={"current": 6, "total": 6}):
-                            yield chunk
-                        
                         # 持久化成功
                         share_slug = await persist_success(run_id, goal, "", cdn_url)
                         
                         async for chunk in emit("System", "run_finished", run_id, thread_id, 
-                                               delta="✅ 完成！", 
+                                               delta=f"🎬 最终视频已生成：{cdn_url}", 
                                                progress={"current": 6, "total": 6}, 
                                                payload={"share_slug": share_slug, "video_url": cdn_url}):
                             yield chunk
@@ -1738,7 +1733,9 @@ async def crewai_chat(request: Request):
                             
                             try:
                                 # 为 scene 生成一张代表性图片
-                                image_url = await image_provider.generate(f"{scene_desc}，视频场景画面")
+                                # 【重要】避免生成带有人脸的图片，因为 sora2 不支持使用真人图片作为参考
+                                image_prompt = f"{scene_desc}，视频场景画面，无人脸、无真人，无人物形象，无人物形象"
+                                image_url = await image_provider.generate(image_prompt)
                                 scene["image_url"] = image_url
                                 logger.info(f"[crewai-chat] Generated image for scene {scene_idx}: {image_url}")
                             except Exception as e:
@@ -1763,25 +1760,43 @@ async def crewai_chat(request: Request):
                             "storyboard": storyboard_data,
                         }
                         
-                        # 轮询等待确认（最多等待 5 分钟）
+                        # 轮询等待确认（最多等待 30 分钟，允许用户长时间不操作）
                         import time
-                        max_wait_time = 300  # 5 分钟
+                        max_wait_time = 1800  # 30 分钟，允许用户长时间思考
                         start_time = time.time()
                         confirmed = False
+                        last_heartbeat = time.time()
+                        heartbeat_interval = 30  # 每30秒发送一次心跳，保持连接活跃
+                        
                         while time.time() - start_time < max_wait_time:
                             await asyncio.sleep(1)  # 每秒检查一次
-                            confirmation = crewai_chat._storyboard_confirmations.get(confirmation_key)
                             
-                            # 同时检查 confirm_storyboard 端点的确认状态
-                            if not confirmation and hasattr(confirm_storyboard, "_confirmations"):
+                            # 发送心跳消息，保持 SSE 连接活跃（每30秒一次）
+                            current_time = time.time()
+                            if current_time - last_heartbeat >= heartbeat_interval:
+                                elapsed_minutes = int((current_time - start_time) / 60)
+                                async for chunk in emit("System", "heartbeat", run_id, thread_id,
+                                                       delta=f"⏳ 等待您的确认...（已等待 {elapsed_minutes} 分钟）"):
+                                    yield chunk
+                                last_heartbeat = current_time
+                            
+                            # 优先检查 confirm_storyboard 端点的确认状态（用户点击确认后存储在这里）
+                            confirmation = None
+                            if hasattr(confirm_storyboard, "_confirmations"):
                                 confirmation = confirm_storyboard._confirmations.get(confirmation_key)
-                                if confirmation:
-                                    # 同步到 crewai_chat 的存储
-                                    crewai_chat._storyboard_confirmations[confirmation_key] = confirmation
+                            
+                            # 如果 confirm_storyboard 中没有，再检查 crewai_chat 的存储
+                            if not confirmation:
+                                confirmation = crewai_chat._storyboard_confirmations.get(confirmation_key)
+                            
+                            # 如果找到确认状态，同步到 crewai_chat 的存储
+                            if confirmation:
+                                crewai_chat._storyboard_confirmations[confirmation_key] = confirmation
                             
                             if confirmation and confirmation.get("status") == "confirmed":
                                 # 用户已确认，继续执行
                                 confirmed = True
+                                logger.info(f"[crewai-chat] Storyboard confirmed for {run_id}, continuing workflow...")
                                 break
                             elif confirmation and confirmation.get("status") == "rejected":
                                 # 用户拒绝，需要重新生成
@@ -1812,7 +1827,9 @@ async def crewai_chat(request: Request):
                                         scene_desc = f"场景{scene_idx}"
                                     
                                     try:
-                                        image_url = await image_provider.generate(f"{scene_desc}，视频场景画面")
+                                        # 【重要】避免生成带有人脸的图片，因为 sora2 不支持使用真人图片作为参考
+                                        image_prompt = f"{scene_desc}，视频场景画面，无人脸、无真人，无人物形象"
+                                        image_url = await image_provider.generate(image_prompt)
                                         scene["image_url"] = image_url
                                         logger.info(f"[crewai-chat] Regenerated image for scene {scene_idx}: {image_url}")
                                     except Exception as e:
@@ -1842,43 +1859,214 @@ async def crewai_chat(request: Request):
                     
                     # 继续执行后续流程（审核、合并、生成视频等）
                     if confirmed and storyboard_data:
+                        logger.info(f"[crewai-chat] Starting remaining workflow for {run_id}, storyboard_data exists: {bool(storyboard_data)}")
                         async for chunk in emit("System", "info", run_id, thread_id,
                                                delta="故事板已确认，继续执行后续流程…"):
                             yield chunk
-                    
-                    # 执行剩余的工作流（从审核开始）
-                    # 使用已确认的 storyboard 继续执行完整工作流
-                    storyboards_json = json.dumps(storyboard_data, ensure_ascii=False)
-                    
-                    def execute_remaining_workflow():
-                        """执行剩余的工作流"""
-                        from crewai_workflow import build_crew
+                        
+                        # 执行剩余的工作流（从审核开始）
                         # 使用已确认的 storyboard 继续执行完整工作流
-                        remaining_crew = build_crew(payload)
-                        return remaining_crew.kickoff(inputs={"storyboards_json": storyboards_json})
-                    
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        result = await loop.run_in_executor(
-                            executor,
-                            execute_remaining_workflow
-                        )
-                    
-                    result_str = str(result)
-                    
-                    # 检查结果
-                    if "http" in result_str.lower() or ".mp4" in result_str.lower():
-                        import re
-                        url_match = re.search(r'https?://[^\s<>"{}|\\^`\[\]]+\.mp4', result_str)
-                        if url_match:
-                            video_url = url_match.group(0)
-                            async for chunk in emit("System", "completed", run_id, thread_id,
-                                                   delta="✅ 视频生成完成！",
-                                                   payload={"video_url": video_url}):
-                                yield chunk
-                    else:
-                        async for chunk in emit("System", "error", run_id, thread_id,
-                                               delta=f"⚠️ 工作流完成，但未找到视频 URL。结果：{result_str[:200]}"):
+                        storyboards_json = json.dumps(storyboard_data, ensure_ascii=False)
+                        
+                        # 发送审核阶段开始
+                        async for chunk in emit("审核", "thought", run_id, thread_id,
+                                               delta="✅ 审核：检查分镜质量，合并镜头为视频任务…"):
                             yield chunk
+                        
+                        # 执行审核和合并任务（跳过plan，因为storyboard已经确认）
+                        from crewai_tools import review_storyboard_impl, merge_storyboards_to_video_tasks_impl
+                        
+                        try:
+                            # 审核storyboard（同步函数，可以直接调用实现函数）
+                            reviewed_storyboard_json = review_storyboard_impl(
+                                storyboards_json, 
+                                num_clips=1,  # 使用默认值
+                                goal=payload.get("goal", ""), 
+                                styles=payload.get("styles", []), 
+                                total_duration=float(payload.get("total_duration", 10.0))
+                            )
+                            reviewed_storyboard = json.loads(reviewed_storyboard_json) if isinstance(reviewed_storyboard_json, str) else reviewed_storyboard_json
+                            
+                            async for chunk in emit("审核", "tool_result", run_id, thread_id,
+                                                   delta="✅ 分镜脚本审核通过"):
+                                yield chunk
+                            
+                            # 合并为视频任务（同步函数，可以直接调用实现函数）
+                            async for chunk in emit("审核", "thought", run_id, thread_id,
+                                                   delta="📋 正在合并镜头为视频任务…"):
+                                yield chunk
+                            
+                            video_tasks_json = merge_storyboards_to_video_tasks_impl(
+                                reviewed_storyboard_json, 
+                                run_id, 
+                                float(payload.get("total_duration", 10.0))
+                            )
+                            video_tasks = json.loads(video_tasks_json) if isinstance(video_tasks_json, str) else video_tasks_json
+                            
+                            async for chunk in emit("审核", "tool_result", run_id, thread_id,
+                                                   delta=f"✅ 已创建 {len(video_tasks)} 个视频任务"):
+                                yield chunk
+                            
+                            # 开始生成视频片段
+                            async for chunk in emit("制片", "thought", run_id, thread_id,
+                                                   delta="📹 制片：开始生成视频片段…"):
+                                yield chunk
+                            
+                            # 调用视频生成工具，并实时发送进度
+                            from crewai_tools import generate_video_clip_tool
+                            
+                            # 发送生成开始信息
+                            async for chunk in emit("制片", "info", run_id, thread_id,
+                                                   delta=f"正在为 {len(video_tasks)} 个场景生成视频片段…"):
+                                yield chunk
+                            
+                            # 执行视频生成（这会提交任务到队列）
+                            # 使用内部实现函数，可以直接await
+                            from crewai_tools import generate_video_clip_impl
+                            clip_results_json = await generate_video_clip_impl(video_tasks_json, run_id)
+                            clip_results = json.loads(clip_results_json) if isinstance(clip_results_json, str) else clip_results_json
+                            
+                            # 发送任务提交结果
+                            submitted_count = sum(1 for r in clip_results if r.get("status") in ["submitted", "pending"])
+                            async for chunk in emit("制片", "tool_result", run_id, thread_id,
+                                                   delta=f"✅ 已提交 {submitted_count} 个视频生成任务，正在处理中…"):
+                                yield chunk
+                            
+                            # 轮询视频任务状态，直到所有任务完成
+                            import time
+                            import os
+                            from supabase import create_client
+                            
+                            supabase_url = os.getenv("SUPABASE_URL")
+                            supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+                            supabase_client = None
+                            if supabase_url and supabase_key:
+                                supabase_client = create_client(supabase_url, supabase_key)
+                            
+                            # 存储已完成的视频片段
+                            completed_clips = {}
+                            max_wait_time = 1800  # 最多等待30分钟，视频生成需要较长时间
+                            start_time = time.time()
+                            check_interval = 3  # 每3秒检查一次
+                            last_heartbeat = time.time()
+                            heartbeat_interval = 30  # 每30秒发送一次心跳，保持连接活跃
+                            
+                            while time.time() - start_time < max_wait_time:
+                                await asyncio.sleep(check_interval)
+                                
+                                # 发送心跳消息，保持 SSE 连接活跃（每30秒一次）
+                                current_time = time.time()
+                                if current_time - last_heartbeat >= heartbeat_interval:
+                                    elapsed_minutes = int((current_time - start_time) / 60)
+                                    completed_count = len(completed_clips)
+                                    total_count = len(video_tasks)
+                                    async for chunk in emit("制片", "heartbeat", run_id, thread_id,
+                                                           delta=f"⏳ 视频生成中... 已完成 {completed_count}/{total_count} 个片段（已等待 {elapsed_minutes} 分钟）"):
+                                        yield chunk
+                                    last_heartbeat = current_time
+                                
+                                # 查询video_tasks表获取最新状态
+                                if supabase_client:
+                                    try:
+                                        tasks_res = supabase_client.table("video_tasks").select("*").eq("run_id", run_id).execute()
+                                        tasks = tasks_res.data if tasks_res.data else []
+                                        
+                                        # 检查是否有新完成的片段
+                                        for task in tasks:
+                                            task_idx = task.get("clip_idx") or task.get("task_idx")
+                                            status = task.get("status")
+                                            video_url = task.get("video_url")
+                                            
+                                            if task_idx and status == "succeeded" and video_url:
+                                                if task_idx not in completed_clips:
+                                                    completed_clips[task_idx] = {
+                                                        "task_idx": task_idx,
+                                                        "video_url": video_url,
+                                                        "status": "succeeded"
+                                                    }
+                                                    
+                                                    # 发送视频片段完成事件
+                                                    async for chunk in emit("制片", "video_clip_completed", run_id, thread_id,
+                                                                           delta=f"✅ 场景 {task_idx} 视频片段生成完成",
+                                                                           payload={
+                                                                               "task_idx": task_idx,
+                                                                               "video_url": video_url,
+                                                                               "status": "succeeded",
+                                                                               "requires_confirmation": True
+                                                                           }):
+                                                        yield chunk
+                                        
+                                        # 检查是否所有任务都完成了
+                                        all_completed = all(
+                                            task.get("status") in ["succeeded", "failed"] 
+                                            for task in tasks
+                                        )
+                                        
+                                        if all_completed and len(tasks) > 0:
+                                            # 发送所有完成的视频片段给前端确认
+                                            all_clips = []
+                                            for task in tasks:
+                                                if task.get("status") == "succeeded" and task.get("video_url"):
+                                                    all_clips.append({
+                                                        "task_idx": task.get("clip_idx") or task.get("task_idx"),
+                                                        "video_url": task.get("video_url"),
+                                                        "status": "succeeded"
+                                                    })
+                                            
+                                            if all_clips:
+                                                async for chunk in emit("System", "video_clips_pending", run_id, thread_id,
+                                                                       delta="所有视频片段已生成，请审核并确认",
+                                                                       payload={
+                                                                           "clips": all_clips,
+                                                                           "requires_confirmation": True
+                                                                       }):
+                                                    yield chunk
+                                            break
+                                        
+                                        # 发送进度更新
+                                        completed_count = sum(1 for task in tasks if task.get("status") == "succeeded")
+                                        total_count = len(tasks)
+                                        if total_count > 0:
+                                            progress_pct = int((completed_count / total_count) * 100)
+                                            async for chunk in emit("制片", "progress", run_id, thread_id,
+                                                                   delta=f"生成进度：{completed_count}/{total_count} ({progress_pct}%)",
+                                                                   progress={"current": completed_count, "total": total_count}):
+                                                yield chunk
+                                    except Exception as e:
+                                        logger.warning(f"[crewai-chat] Error checking video tasks: {e}")
+                                
+                                # 如果已经有所有片段，也退出
+                                if len(completed_clips) >= len(video_tasks):
+                                    break
+                            
+                            # 如果超时，发送当前状态
+                            if time.time() - start_time >= max_wait_time:
+                                async for chunk in emit("System", "info", run_id, thread_id,
+                                                       delta="⏳ 视频生成仍在进行中，完成后将自动通知…"):
+                                    yield chunk
+                            
+                        except Exception as e:
+                            logger.error(f"[crewai-chat] Error executing remaining workflow: {e}", exc_info=True)
+                            async for chunk in emit("System", "error", run_id, thread_id,
+                                                   delta=f"执行后续流程时出错：{str(e)}"):
+                                yield chunk
+                            return
+                    else:
+                        logger.warning(f"[crewai-chat] Skipping remaining workflow: confirmed={confirmed}, storyboard_data exists={bool(storyboard_data)}")
+                        if not confirmed:
+                            async for chunk in emit("System", "error", run_id, thread_id,
+                                                   delta="故事板未确认，无法继续执行"):
+                                yield chunk
+                        elif not storyboard_data:
+                            async for chunk in emit("System", "error", run_id, thread_id,
+                                                   delta="故事板数据缺失，无法继续执行"):
+                                yield chunk
+                        return
+                    
+                    # 注意：视频生成流程已经通过轮询和事件发送给前端
+                    # 视频片段的完成状态会通过 video_clip_completed 和 video_clips_pending 事件发送
+                    # 最终视频的拼接会在所有片段确认后自动触发
+                    # 这里不需要检查 result，因为我们已经改变了工作流执行方式
                 
                 crewai_chat._conversation_states[state_key] = conversation_state
             
@@ -1926,5 +2114,222 @@ async def recommend(slug: str, limit: int = 8):
         return q.data
     rec = supabase.table("prompts_library").select("id, title, category, cover_url").order("created_at", desc=True).limit(limit).execute()
     return rec.data or []
+
+
+class VideoClipsConfirmRequest(BaseModel):
+    run_id: str
+    confirmed: bool = True
+
+
+@app.post("/crewai/video-clips/confirm")
+async def crewai_video_clips_confirm(body: VideoClipsConfirmRequest):
+    """
+    确认所有视频片段并触发拼接
+    
+    从数据库获取所有已完成的视频片段，然后调用拼接函数。
+    """
+    import os
+    import json
+    from supabase import create_client
+    
+    if not body.confirmed:
+        return {"error": "需要确认所有视频片段"}
+    
+    try:
+        # 从数据库获取所有视频片段
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+        
+        if not supabase_url or not supabase_key:
+            return {"error": "Supabase 配置缺失"}
+        
+        supabase = create_client(supabase_url, supabase_key)
+        
+        # 先检查 crew_sessions 表的状态，如果已经在拼接或已完成，直接返回结果
+        try:
+            session_result = supabase.table("crew_sessions")\
+                .select("status, result")\
+                .eq("run_id", body.run_id)\
+                .execute()
+            
+            if session_result.data and len(session_result.data) > 0:
+                session = session_result.data[0]
+                current_status = session.get("status", "")
+                result = session.get("result", "")
+                
+                # 如果已经完成且有有效结果，直接返回
+                if current_status == "completed" and result and "http" in result.lower() and "example.com" not in result.lower():
+                    logger.info(
+                        f"[crewai_video_clips_confirm] Session already completed for run_id={body.run_id}, "
+                        f"returning existing result: {result[:100]}"
+                    )
+                    return {
+                        "run_id": body.run_id,
+                        "final_url": result,
+                        "status": "completed",
+                        "from_cache": True
+                    }
+                
+                # 如果正在拼接，返回提示信息
+                if current_status == "stitching":
+                    logger.info(
+                        f"[crewai_video_clips_confirm] Session is already stitching for run_id={body.run_id}, "
+                        f"please wait for completion"
+                    )
+                    return {
+                        "run_id": body.run_id,
+                        "status": "stitching",
+                        "message": "视频正在拼接中，请稍候..."
+                    }
+        except Exception as e:
+            logger.debug(f"[crewai_video_clips_confirm] Failed to check crew_sessions: {e}")
+            # 继续执行，不阻塞
+        
+        # 查询所有已完成的视频任务
+        tasks_res = supabase.table("video_tasks")\
+            .select("*")\
+            .eq("run_id", body.run_id)\
+            .order("clip_idx", desc=False)\
+            .execute()
+        
+        tasks = tasks_res.data if tasks_res.data else []
+        
+        if not tasks:
+            return {"error": f"未找到 run_id={body.run_id} 的视频任务"}
+        
+        # 检查是否所有任务都已完成
+        completed_tasks = [t for t in tasks if t.get("status") == "succeeded" and t.get("video_url")]
+        pending_tasks = [t for t in tasks if t.get("status") in ["pending", "submitted", "processing"]]
+        failed_tasks = [t for t in tasks if t.get("status") == "failed"]
+        
+        if pending_tasks:
+            return {
+                "error": f"仍有 {len(pending_tasks)} 个视频任务在处理中，无法拼接",
+                "pending_count": len(pending_tasks),
+                "completed_count": len(completed_tasks),
+                "total_count": len(tasks)
+            }
+        
+        if not completed_tasks:
+            return {
+                "error": "没有已完成的视频片段",
+                "failed_count": len(failed_tasks),
+                "total_count": len(tasks)
+            }
+        
+        # 构建 clip_results 格式（用于 stitch_video_tool）
+        clip_results = []
+        for task in completed_tasks:
+            clip_results.append({
+                "task_idx": task.get("clip_idx") or task.get("task_idx"),
+                "status": "succeeded",
+                "video_url": task.get("video_url"),
+                "task_id": task.get("id")
+            })
+        
+        # 按 task_idx 排序
+        clip_results.sort(key=lambda x: x.get("task_idx", 0) or 0)
+        
+        # 提取所有视频片段URL
+        segments = [r.get("video_url") for r in clip_results if r.get("video_url")]
+        
+        if not segments:
+            return {"error": "没有可用的视频片段URL"}
+        
+        # 再次检查状态（防止在查询任务期间状态发生变化）
+        try:
+            session_check = supabase.table("crew_sessions")\
+                .select("status, result")\
+                .eq("run_id", body.run_id)\
+                .execute()
+            
+            if session_check.data and len(session_check.data) > 0:
+                session = session_check.data[0]
+                current_status = session.get("status", "")
+                result = session.get("result", "")
+                
+                # 如果已经完成且有有效结果，直接返回
+                if current_status == "completed" and result and "http" in result.lower() and "example.com" not in result.lower():
+                    logger.info(
+                        f"[crewai_video_clips_confirm] Session completed during task query for run_id={body.run_id}, "
+                        f"returning existing result: {result[:100]}"
+                    )
+                    return {
+                        "run_id": body.run_id,
+                        "final_url": result,
+                        "status": "completed",
+                        "from_cache": True
+                    }
+                
+                # 如果正在拼接，返回提示信息
+                if current_status == "stitching":
+                    logger.info(
+                        f"[crewai_video_clips_confirm] Session started stitching during task query for run_id={body.run_id}, "
+                        f"please wait for completion"
+                    )
+                    return {
+                        "run_id": body.run_id,
+                        "status": "stitching",
+                        "message": "视频正在拼接中，请稍候..."
+                    }
+        except Exception as e:
+            logger.debug(f"[crewai_video_clips_confirm] Failed to re-check crew_sessions: {e}")
+            # 继续执行，不阻塞
+        
+        logger.info(
+            f"[crewai_video_clips_confirm] Starting stitch for run_id={body.run_id}: "
+            f"{len(segments)} segments"
+        )
+        
+        # 更新状态为 stitching（防止重复拼接）
+        try:
+            from datetime import datetime
+            supabase.table("crew_sessions")\
+                .update({
+                    "status": "stitching",
+                    "updated_at": datetime.utcnow().isoformat()
+                })\
+                .eq("run_id", body.run_id)\
+                .execute()
+        except Exception as e:
+            logger.warning(f"[crewai_video_clips_confirm] Failed to update crew_sessions status to stitching: {e}")
+        
+        # 调用拼接函数
+        from video_stitcher import stitch_video_segments
+        
+        final_key = f"{body.run_id}_final.mp4"
+        cdn_url = await stitch_video_segments(
+            segment_urls=segments,
+            run_id=body.run_id,
+            output_key=final_key
+        )
+        
+        # 更新 crew_sessions 表（如果存在）
+        try:
+            from datetime import datetime
+            supabase.table("crew_sessions")\
+                .update({
+                    "status": "completed",
+                    "result": cdn_url,
+                    "updated_at": datetime.utcnow().isoformat()
+                })\
+                .eq("run_id", body.run_id)\
+                .execute()
+        except Exception as e:
+            logger.warning(f"[crewai_video_clips_confirm] Failed to update crew_sessions: {e}")
+        
+        logger.info(
+            f"[crewai_video_clips_confirm] Stitch completed for run_id={body.run_id}: {cdn_url}"
+        )
+        
+        return {
+            "run_id": body.run_id,
+            "segments": segments,
+            "final_url": cdn_url,
+            "status": "completed"
+        }
+    except Exception as e:
+        logger.error(f"[crewai_video_clips_confirm] Error: {e}", exc_info=True)
+        return {"error": str(e)}
 
 

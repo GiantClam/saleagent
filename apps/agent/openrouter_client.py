@@ -121,6 +121,22 @@ class OpenRouterClient:
                     logger.info(f"[OpenRouterClient] Found content in reasoning field (len={len(reasoning)}): {reasoning[:200]}")
                     return reasoning.strip()
                 
+                # 检查 reasoning_details（某些模型使用加密的 reasoning）
+                reasoning_details = msg.get("reasoning_details")
+                if isinstance(reasoning_details, list) and len(reasoning_details) > 0:
+                    # 尝试从 reasoning_details 中提取内容
+                    for detail in reasoning_details:
+                        if isinstance(detail, dict):
+                            # 如果是加密的 reasoning，无法直接使用，但可以记录
+                            if detail.get("type") == "reasoning.encrypted":
+                                logger.warning(f"[OpenRouterClient] Found encrypted reasoning, cannot extract content directly")
+                            # 如果有其他可用的文本字段
+                            elif detail.get("text"):
+                                text = detail.get("text")
+                                if isinstance(text, str) and text.strip():
+                                    logger.info(f"[OpenRouterClient] Found content in reasoning_details (len={len(text)}): {text[:200]}")
+                                    return text.strip()
+                
                 # fallback: text field
                 text_field = choice.get("text")
                 if isinstance(text_field, str) and text_field.strip():
@@ -142,10 +158,16 @@ class OpenRouterClient:
                 logger.warning(f"[OpenRouterClient] msg.get('content'): {repr(msg.get('content'))}")
                 logger.warning(f"[OpenRouterClient] msg.get('refusal'): {repr(msg.get('refusal'))}")
                 logger.warning(f"[OpenRouterClient] msg.get('reasoning'): {repr(msg.get('reasoning'))}")
+                logger.warning(f"[OpenRouterClient] msg.get('reasoning_details'): {repr(msg.get('reasoning_details'))}")
                 
                 # 如果模型拒绝生成，抛出更明确的错误
                 if refusal:
                     raise OpenRouterError(f"模型拒绝生成内容: {refusal}")
+                
+                # 如果 finish_reason 是 "length"，说明内容被截断了，但可能有一些内容
+                finish_reason = choice.get("finish_reason")
+                if finish_reason == "length":
+                    logger.warning(f"[OpenRouterClient] Response was truncated (finish_reason=length), but no content found")
                 
                 return ""
             except Exception as e:

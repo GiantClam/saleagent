@@ -64,20 +64,29 @@ def build_crew(payload: Dict[str, Any]) -> Crew:
         plan_description += f"一致性要求：{', '.join(consistency_elements)}必须在所有场景中保持一致\n"
     plan_description += f"【重要】输出格式要求：\n"
     plan_description += f"1. 必须使用 scene 结构，每个 scene 恰好10秒\n"
-    plan_description += f"2. 每个 scene 包含多个镜头（clips），镜头数量可以根据内容需要灵活调整\n"
-    plan_description += f"3. 每个镜头的时长（end_s - begin_s）必须不超过10s\n"
-    plan_description += f"4. scene 内的镜头时间必须连续，且 scene 总时长必须恰好为10s\n"
-    plan_description += f"5. 确保关键元素在适当的时候出现，一致性元素在所有场景中保持一致\n"
+    plan_description += f"2. 每个 scene 必须包含完整的旁白文案（narration），约30-40字，覆盖整个10秒时长\n"
+    plan_description += f"3. 每个 scene 包含多个镜头（clips），镜头数量可以根据内容需要灵活调整\n"
+    plan_description += f"4. 每个镜头的时长（end_s - begin_s）必须不超过10s\n"
+    plan_description += f"5. scene 内的镜头时间必须连续，且 scene 总时长必须恰好为10s\n"
+    plan_description += f"6. 确保关键元素在适当的时候出现，一致性元素在所有场景中保持一致\n"
+    plan_description += f"【关键】场景转场衔接要求：\n"
+    plan_description += f"1. 每个场景的结尾画面应该自然过渡到下一个场景的开头画面\n"
+    plan_description += f"2. 考虑场景之间的视觉连贯性，使用相似的色调、构图或元素进行衔接\n"
+    plan_description += f"3. 相邻场景之间应该有逻辑关联，避免突兀的跳跃\n"
+    plan_description += f"【关键】文案完整性要求：\n"
+    plan_description += f"1. 每个场景的文案应该与画面内容完美匹配，描述场景中正在发生的事情\n"
+    plan_description += f"2. 相邻场景的文案应该自然衔接，确保整体叙述的连贯性\n"
     # 使用单引号避免 f-string 中的反斜杠问题
-    json_example = '{"scenes": [{"scene_idx": 1, "clips": [{"idx": 1, "desc": "...", "begin_s": 0.0, "end_s": 3.0}, ...], "begin_s": 0.0, "end_s": 10.0}, ...]}'
+    json_example = '{"scenes": [{"scene_idx": 1, "narration": "完整的旁白文案（30-40字）", "clips": [{"idx": 1, "desc": "...", "begin_s": 0.0, "end_s": 3.0}, ...], "begin_s": 0.0, "end_s": 10.0}, ...]}'
     plan_description += f"JSON 格式：{json_example}"
     
     task_plan = Task(
         description=plan_description,
         agent=director_agent,
-        expected_output="分镜脚本（JSON 格式，包含 scenes 数组），每个 scene 恰好10秒，包含多个镜头（clips），每个镜头包含 idx, desc, begin_s, end_s",
+        expected_output="分镜脚本（JSON 格式，包含 scenes 数组），每个 scene 恰好10秒，包含 narration（完整的旁白文案，30-40字），包含多个镜头（clips），每个镜头包含 idx, desc, begin_s, end_s",
         context=[task_optimize],
-        human_input=True,  # 启用 Human Input on Execution，等待用户确认 storyboard
+        # 注意：不在这里使用 human_input=True，因为我们在 main.py 中自己实现了 storyboard 确认流程
+        # human_input 会在刷新页面后导致 CrewAI 等待用户输入，但前端无法处理
     )
 
     # 分镜脚本审核任务 - 包含一致性检查
@@ -126,6 +135,7 @@ def build_crew(payload: Dict[str, Any]) -> Crew:
             f"输入是审核通过的分镜脚本（scene 结构）。\n"
             f"为每个 scene 生成一张代表性的预览图片，用于前端展示。\n"
             f"图片应该反映 scene 的整体视觉效果和主要内容。\n"
+            f"【重要】生成的图片必须避免出现人物、人脸或真人形象，因为 sora2 不支持使用真人图片作为参考。\n"
             f"使用工具：生成关键帧工具（storyboards_json 参数传入 scene 结构的 JSON，image_control=True）\n"
             f"【重要】必须返回包含 image_url 字段的完整 scene 结构 JSON，格式：{{\"scenes\": [{{\"scene_idx\": 1, \"image_url\": \"...\", \"clips\": [...]}}, ...]}}"
         ),
@@ -169,7 +179,8 @@ def build_crew(payload: Dict[str, Any]) -> Crew:
     crew = Crew(
         agents=[creative_agent, director_agent, reviewer_agent, visual_agent, producer_agent, editor_agent],
         tasks=tasks,
-        process=Process.sequential,
+        process=Process.sequential,  # 使用 sequential 模式，确保任务按顺序执行
+        # 不使用 hierarchical 或 planning，因为我们的任务流程是固定的，sequential 更稳定
         verbose=True,
     )
     return crew

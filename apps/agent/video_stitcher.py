@@ -79,15 +79,78 @@ async def stitch_video_segments(
             for path in segment_paths:
                 f.write(f"file '{path}'\n")
         
-        # 使用 ffmpeg 拼接
+        # 使用 ffmpeg 拼接，添加转场效果（淡入淡出、交叉溶解）
         output_path = os.path.join(tmpdir, "final.mp4")
-        cmd = [
-            "ffmpeg", "-f", "concat", "-safe", "0", "-i", concat_file,
-            "-c", "copy", "-movflags", "+faststart", "-y", output_path
-        ]
+        
+        # 如果只有一个片段，直接复制
+        if len(segment_paths) == 1:
+            cmd = [
+                "ffmpeg", "-i", segment_paths[0],
+                "-c", "copy", "-movflags", "+faststart", "-y", output_path
+            ]
+            logger.info(f"[video_stitcher] Single segment, using simple copy")
+        else:
+            # 多个片段：使用 filter_complex 添加转场效果
+            # 转场效果：每个片段之间添加 0.3 秒的交叉溶解（crossfade）
+            # 第一个片段：淡入 0.3 秒
+            # 中间片段：前一个片段的最后 0.3 秒与当前片段的前 0.3 秒交叉溶解
+            # 最后一个片段：淡出 0.3 秒
+            
+            fade_duration = 0.3  # 转场时长（秒）
+            
+            # 构建输入参数
+            input_args = []
+            for path in segment_paths:
+                input_args.extend(["-i", path])
+            
+            # 构建 filter_complex（使用更简单的方法）
+            # 为每个片段添加淡入淡出效果
+            filter_parts = []
+            for i in range(len(segment_paths)):
+                # 每个片段：开头淡入，结尾淡出
+                if i == 0:
+                    # 第一个片段：开头淡入
+                    filter_parts.append(f"[{i}:v]fade=t=in:st=0:d={fade_duration}[v{i}];")
+                elif i == len(segment_paths) - 1:
+                    # 最后一个片段：结尾淡出
+                    filter_parts.append(f"[{i}:v]fade=t=out:st=10-{fade_duration}:d={fade_duration}[v{i}];")
+                else:
+                    # 中间片段：开头淡入，结尾淡出
+                    filter_parts.append(f"[{i}:v]fade=t=in:st=0:d={fade_duration},fade=t=out:st=10-{fade_duration}:d={fade_duration}[v{i}];")
+            
+            # 连接所有片段
+            concat_inputs = "".join([f"[v{i}]" for i in range(len(segment_paths))])
+            filter_parts.append(f"{concat_inputs}concat=n={len(segment_paths)}:v=1:a=0[vout]")
+            
+            filter_complex = "".join(filter_parts)
+            
+            # 构建 FFmpeg 命令
+            cmd = [
+                "ffmpeg"
+            ] + input_args + [
+                "-filter_complex", filter_complex,
+                "-map", "[vout]",
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "23",
+                "-movflags", "+faststart",
+                "-pix_fmt", "yuv420p",
+                "-y", output_path
+            ]
+            logger.info(f"[video_stitcher] Multiple segments ({len(segment_paths)}), using transitions with fade duration={fade_duration}s")
+        
+        logger.info(f"[video_stitcher] Running FFmpeg command: {' '.join(cmd[:10])}... (truncated)")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg 拼接失败: {result.stderr}")
+            # 如果转场效果失败，降级到简单拼接
+            logger.warning(f"[video_stitcher] FFmpeg with transitions failed: {result.stderr[:500]}, falling back to simple concat")
+            cmd_simple = [
+                "ffmpeg", "-f", "concat", "-safe", "0", "-i", concat_file,
+                "-c", "copy", "-movflags", "+faststart", "-y", output_path
+            ]
+            result = subprocess.run(cmd_simple, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"FFmpeg 拼接失败: {result.stderr}")
         
         # 验证输出文件是否存在
         if not os.path.exists(output_path):

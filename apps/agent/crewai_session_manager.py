@@ -405,6 +405,38 @@ class CrewAISessionManager:
                         self.logger.warning(f"[CrewAISessionManager] Failed to update jobs table: {e}")
                     return
             
+            # 如果正在拼接，检查是否已经有结果（可能拼接在后台完成）
+            if current_status == "stitching":
+                # 如果已经有有效结果，更新状态为 completed
+                if result and "http" in result.lower() and "example.com" not in result.lower():
+                    r2_public_base = os.getenv("R2_PUBLIC_BASE", "")
+                    is_valid_url = (
+                        result and 
+                        ("http" in result.lower() or result.startswith("https://")) and
+                        "example.com" not in result.lower() and
+                        (not r2_public_base or result.startswith(r2_public_base.rstrip("/")))
+                    )
+                    if is_valid_url:
+                        self.logger.info(
+                            f"[CrewAISessionManager] Stitch already completed (status=stitching but has result) "
+                            f"for run_id={run_id}, result={result[:100]}, updating status to completed"
+                        )
+                        self.supabase.table("crew_sessions")\
+                            .update({
+                                "status": "completed",
+                                "updated_at": datetime.utcnow().isoformat()
+                            })\
+                            .eq("run_id", run_id)\
+                            .execute()
+                        return
+                else:
+                    # 正在拼接但没有结果，可能是另一个进程正在执行，跳过
+                    self.logger.info(
+                        f"[CrewAISessionManager] Stitch already in progress (status=stitching) "
+                        f"for run_id={run_id}, skipping to avoid duplicate execution"
+                    )
+                    return
+            
             # 如果已经完成且有有效结果，跳过
             if current_status == "completed" and result and "http" in result.lower():
                 # 检查 result 是否是有效的 URL（不包含 example.com）

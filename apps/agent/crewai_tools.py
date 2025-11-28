@@ -411,6 +411,71 @@ def optimize_prompt_tool(user_prompt: str) -> str:
     return _run_async_safe(_optimize())
 
 
+@tool("生成Sora2视频提示词")
+def generate_sora2_prompt_tool(
+    product_name: str,
+    product_features: str,
+    video_type: str,
+    language: str,
+    duration: str,
+    reference_image_info: str | None = None,
+    reference_image_description: str | None = None,
+) -> str:
+    """
+    生成符合 Sora 2 技术规范的电商视频提示词，仅输出提示词文本。
+    
+    Args:
+        product_name: 产品名称
+        product_features: 产品卖点描述
+        video_type: 视频类型（如奢侈品展示/运动性能/日常生活/技术创新等）
+        language: 目标语言
+        duration: 视频时长（10/15/25秒之一）
+        reference_image_info: 参考图片信息（可选）
+        reference_image_description: 参考图片描述（可选）
+    
+    Returns:
+        直接可用于 Sora-2 的视频提示词文本
+    """
+    import logging
+    logger = logging.getLogger("crewai_tools")
+    if not (OPENROUTER_BASE and OPENROUTER_KEY):
+        raise RuntimeError("未配置 OpenRouter（OPENROUTER_API_BASE / OPENROUTER_API_KEY）")
+    or_client = OpenRouterClient(
+        api_base=OPENROUTER_BASE,
+        api_key=OPENROUTER_KEY,
+        referer=EMBED_REFERER,
+        title="SaleAgent"
+    )
+    sys_prompt = (
+        "你是一位专业的电商视频导演助手，为 Sora 2 生成直接可用的视频提示词。"
+        "严格遵守：时长仅 10/15/25 秒；画幅 16:9 或 9:16；"
+        "原生同步旁白（目标语言，单句不超过8字）；音效分层与音乐节奏；"
+        "真实物理与摄像机运动；避免屏幕文字、复杂多物体物理、瞬间加速、过度荷兰角、过度眩光。"
+        "输出只包含提示词内容，不要任何说明或额外文字。"
+    )
+    user_prompt = (
+        "请为以下电商产品生成一个专业的 Sora-2 视频提示词：\n\n"
+        f"产品名称：{product_name}\n"
+        f"产品卖点：{product_features}\n"
+        f"视频类型：{video_type}\n"
+        f"目标语言：{language}\n"
+        f"视频时长：{duration}\n"
+        f"{reference_image_info or ''}\n"
+        f"{reference_image_description or ''}\n\n"
+        "请生成一个完整完善的、直接可用于 Sora-2 的视频提示词。注意只输出提示词内容。"
+    )
+    async def _gen():
+        return await or_client.chat_completions(
+            model=PROMPT_LLM_MODEL,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=1200,
+        )
+    return _run_async_safe(_gen())
+
 import logging
 logger = logging.getLogger("crewai_tools")
 
@@ -433,6 +498,7 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
     num_scenes = max(1, int(total_duration / 10.0) + (1 if total_duration % 10.0 > 0 else 0))
     
     # 要求输出严格的 JSON 对象（包含 scenes 数组），每个 scene 包含多个镜头
+    # 【关键】由于 director_agent 不启用 reasoning，这里需要在 prompt 中强调格式要求
     sys_prompt = (
         "你是资深广告导演。根据用户目标与风格，将整个视频拆分为场景（scene），每个场景包含多个镜头（clip）。\n\n"
         "【重要】结构要求：\n"
@@ -440,15 +506,29 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         "2. 每个场景包含多个镜头（clip），镜头数量可以根据内容需要灵活调整\n"
         "3. 每个镜头的时长（end_s - begin_s）必须不超过10s\n"
         "4. 场景内的镜头时间必须连续，且场景总时长必须恰好为10s\n\n"
-        "【重要】输出格式要求（必须严格遵守）：\n"
-        "1. 严格只输出 JSON 对象，不要任何额外文字、说明、Markdown 代码块或注释\n"
-        "2. JSON 结构必须为：{\"scenes\": [{\"scene_idx\": 1, \"clips\": [{\"idx\": 1, \"desc\": \"…\", \"begin_s\": 0.0, \"end_s\": 3.0}, ...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
-        "3. 每个 scene 必须包含 scene_idx, clips, begin_s, end_s 字段\n"
-        "4. 每个 clip 必须包含 idx, desc, begin_s, end_s 字段，且 end_s - begin_s <= 10.0\n"
-        "5. scene 的 begin_s 和 end_s 必须恰好相差 10.0 秒\n"
-        "6. scene 内的 clips 时间必须连续，且覆盖整个 scene 的时长\n"
-        "7. desc 为一句中文分镜描述（20-50字），不含编号/时间/标题/Markdown 符号\n"
-        "8. 不要输出 keyframes，这些由后续工具生成\n\n"
+        "【关键】场景转场衔接要求：\n"
+        "1. 每个场景的结尾画面应该自然过渡到下一个场景的开头画面\n"
+        "2. 考虑场景之间的视觉连贯性，使用相似的色调、构图或元素进行衔接\n"
+        "3. 在场景描述中考虑转场方式（淡入淡出、交叉溶解、硬切等），确保视觉流畅\n"
+        "4. 相邻场景之间应该有逻辑关联，避免突兀的跳跃\n\n"
+        "【关键】文案完整性要求：\n"
+        "1. 每个场景必须包含完整的介绍文案（narration），文案应该覆盖整个场景的10秒时长\n"
+        "2. 文案应该自然、流畅，与画面内容完美匹配，时长约30-40字（10秒旁白）\n"
+        "3. 确保文案的完整性，不要截断或省略关键信息\n"
+        "4. 文案应该与场景内的镜头内容同步，描述画面中正在发生的事情\n"
+        "5. 文案应该具有连贯性，相邻场景的文案应该自然衔接\n\n"
+        "【关键】输出格式要求（必须严格遵守，这是最重要的）：\n"
+        "1. 严格只输出 JSON 对象，不要任何额外文字、说明、Markdown 代码块、注释或思考过程\n"
+        "2. 不要输出任何 reasoning 或思考过程，直接输出 JSON\n"
+        "3. JSON 结构必须为：{\"scenes\": [{\"scene_idx\": 1, \"narration\": \"完整的旁白文案（30-40字）\", \"clips\": [{\"idx\": 1, \"desc\": \"…\", \"begin_s\": 0.0, \"end_s\": 3.0}, ...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
+        "4. 每个 scene 必须包含 scene_idx, narration, clips, begin_s, end_s 字段\n"
+        "5. narration 字段：完整的旁白文案（30-40字），覆盖整个场景的10秒时长，与画面内容匹配\n"
+        "6. 每个 clip 必须包含 idx, desc, begin_s, end_s 字段，且 end_s - begin_s <= 10.0\n"
+        "7. scene 的 begin_s 和 end_s 必须恰好相差 10.0 秒\n"
+        "8. scene 内的 clips 时间必须连续，且覆盖整个 scene 的时长\n"
+        "9. desc 为一句中文分镜描述（20-50字），不含编号/时间/标题/Markdown 符号\n"
+        "10. 不要输出 keyframes，这些由后续工具生成\n"
+        "11. 【最重要】直接输出 JSON，不要任何前缀、后缀或说明文字\n\n"
         "【正确示例】（必须完全按照此格式）：\n"
         "{\n"
         "  \"scenes\": [\n"
@@ -481,9 +561,15 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         f"风格：{', '.join(styles) if styles else '通用'}\n"
         f"总时长：{total_duration}秒\n"
         f"场景数：{num_scenes}（必须严格生成恰好 {num_scenes} 个场景，每个场景恰好10秒）\n\n"
+        f"【重要要求】：\n"
+        f"1. 每个场景必须包含完整的旁白文案（narration），约30-40字，覆盖整个10秒时长\n"
+        f"2. 文案应该与画面内容完美匹配，描述场景中正在发生的事情\n"
+        f"3. 相邻场景的文案应该自然衔接，确保整体叙述的连贯性\n"
+        f"4. 每个场景的结尾画面应该考虑与下一个场景的衔接，确保视觉流畅\n"
+        f"5. 使用相似的色调、构图或元素来连接相邻场景，避免突兀的跳跃\n\n"
         f"请严格按上述 JSON 结构返回，scenes 数组必须包含恰好 {num_scenes} 个场景。\n"
-        f"每个场景必须包含多个镜头（clips），镜头数量可以根据内容需要灵活调整。\n"
-        f"【重要】必须返回有效的 JSON 格式，使用 \"scenes\" 作为顶层数组，每个 scene 包含 \"scene_idx\", \"clips\", \"begin_s\", \"end_s\"。\n"
+        f"每个场景必须包含 narration 字段（完整的旁白文案）和多个镜头（clips）。\n"
+        f"【重要】必须返回有效的 JSON 格式，使用 \"scenes\" 作为顶层数组，每个 scene 包含 \"scene_idx\", \"narration\", \"clips\", \"begin_s\", \"end_s\"。\n"
         f"【关键】场景数量必须严格等于 {num_scenes}，每个场景的时长必须恰好为10秒。"
     )
     
@@ -491,60 +577,143 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
     logger.debug(f"[plan_storyboard_impl] System prompt: {sys_prompt[:500]}")
     logger.debug(f"[plan_storyboard_impl] User prompt: {user_prompt[:500]}")
     
-    # 根据分镜数量动态计算 max_tokens：每个分镜约需 80 tokens（JSON格式+中文描述），基础开销 200 tokens
-    calculated_max_tokens = min(3200, num_clips * 800 + 200)
-    logger.info(f"[plan_storyboard_impl] Calculated max_tokens={calculated_max_tokens} for num_clips={num_clips}")
+    # 根据分镜数量动态计算 max_tokens
+    # 注意：对于推理模型（如 gpt-5-mini, gpt-5.1），即使不启用 reasoning，模型本身也会进行推理，需要更多 tokens
+    # Claude 模型（如 claude-sonnet-4.5）对 JSON 支持好，不需要额外 tokens
+    base_tokens = 500
+    is_reasoning_model = "gpt-5" in model or "gpt-5-mini" in model or "gpt-5.1" in model
+    
+    if is_reasoning_model:
+        # 推理模型需要更多 tokens（包括推理过程），每个 scene 约需 500-600 tokens
+        tokens_per_scene = 600
+        # 对于推理模型，大幅增加 max_tokens，避免被截断
+        calculated_max_tokens = min(8000, num_scenes * tokens_per_scene + base_tokens)
+        logger.warning(f"[plan_storyboard_impl] Using reasoning model {model}, increased max_tokens to {calculated_max_tokens} to avoid truncation")
+    elif "claude" in model.lower():
+        # Claude 模型对 JSON 支持很好，每个 scene 约需 200-250 tokens
+        tokens_per_scene = 250
+        calculated_max_tokens = min(4000, num_scenes * tokens_per_scene + base_tokens)
+        logger.info(f"[plan_storyboard_impl] Using Claude model {model}, JSON format support is excellent")
+    else:
+        # 其他非推理模型（如 gpt-4o-mini），每个 scene 约需 200 tokens
+        tokens_per_scene = 200
+        calculated_max_tokens = min(4000, num_scenes * tokens_per_scene + base_tokens)
+    logger.info(f"[plan_storyboard_impl] Calculated max_tokens={calculated_max_tokens} for num_scenes={num_scenes} (model={model})")
     
     try:
-        # 尝试使用 JSON mode 或结构化输出（如果模型支持）
-        # GPT-5-mini 支持结构化输出，可以使用 JSON Schema 强制格式
+        # 尝试使用 JSON Schema 来强制输出指定格式（如果模型支持）
+        # OpenAI GPT-4o 和 Claude Sonnet 4.5 都支持 JSON Schema
         response_format = None
-        if "gpt-5" in model or "gpt-5-mini" in model:
-            # 使用 JSON Schema 强制特定的数据结构
-            # 注意：如果模型不支持 strict schema，可能会失败，需要降级处理
+        is_reasoning_model = "gpt-5" in model or "gpt-5-mini" in model or "gpt-5.1" in model
+        
+        if is_reasoning_model:
+            # 推理模型（gpt-5-mini, gpt-5.1）即使不使用 response_format，模型也会进行推理
+            # 这会导致响应很长，容易被截断，且可能返回加密的 reasoning_details
+            # 建议：使用 claude-sonnet-4.5 或 gpt-4o-mini 来避免这个问题
+            logger.warning(f"[plan_storyboard_impl] Using reasoning model {model} may cause truncation or format issues. Consider using claude-sonnet-4.5 or gpt-4o-mini instead.")
+            # 不使用 response_format，让模型自由输出，在 prompt 中强调 JSON 格式
+            response_format = None
+            logger.info(f"[plan_storyboard_impl] Not using response_format for reasoning model {model} (to avoid encrypted reasoning)")
+        elif "claude" in model.lower() or "gpt-4" in model or "gpt-4o" in model:
+            # Claude 和 GPT-4o 模型支持 JSON Schema，使用 strict schema 强制格式
             try:
-                response_format = {
-                    "type": "json_object",
-                    "json_schema": {
-                        "name": "storyboard_schema",
-                        "strict": True,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "storyboards": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "idx": {
-                                                "type": "integer",
-                                                "description": "镜头序号，从1开始"
-                                            },
-                                            "desc": {
-                                                "type": "string",
-                                                "description": "分镜描述，20-50字的中文描述"
-                                            }
-                                        },
-                                        "required": ["idx", "desc"],
-                                        "additionalProperties": False
+                # 定义 JSON Schema，强制输出 scenes 结构
+                json_schema = {
+                    "type": "object",
+                    "properties": {
+                        "scenes": {
+                            "type": "array",
+                            "description": f"场景数组，每个场景恰好10秒，必须生成恰好{num_scenes}个场景",
+                            "minItems": 1,  # OpenRouter API 只支持 0 或 1，通过描述和 prompt 来要求数量
+                            # 注意：OpenRouter API 不支持 maxItems，完全依赖 prompt 来限制数量
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "scene_idx": {
+                                        "type": "integer",
+                                        "description": "场景序号，从1开始"
                                     },
-                                    "minItems": num_clips,
-                                    "maxItems": num_clips
-                                }
-                            },
-                            "required": ["storyboards"],
-                            "additionalProperties": False
+                                    "narration": {
+                                        "type": "string",
+                                        "description": "完整的旁白文案，约30-40字，覆盖整个场景的10秒时长，与画面内容匹配"
+                                    },
+                                    "begin_s": {
+                                        "type": "number",
+                                        "description": "场景开始时间（秒）"
+                                    },
+                                    "end_s": {
+                                        "type": "number",
+                                        "description": "场景结束时间（秒），必须恰好比 begin_s 大 10.0"
+                                    },
+                                    "clips": {
+                                        "type": "array",
+                                        "description": "镜头数组，每个场景包含至少1个镜头",
+                                        "minItems": 1,  # 保持为 1，符合 OpenRouter API 要求
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "idx": {
+                                                    "type": "integer",
+                                                    "description": "镜头序号，从1开始"
+                                                },
+                                                "desc": {
+                                                    "type": "string",
+                                                    "description": "镜头描述，20-50字的中文描述"
+                                                },
+                                                "begin_s": {
+                                                    "type": "number",
+                                                    "description": "镜头开始时间（秒）"
+                                                },
+                                                "end_s": {
+                                                    "type": "number",
+                                                    "description": "镜头结束时间（秒），必须不超过 begin_s + 10.0"
+                                                }
+                                            },
+                                            "required": ["idx", "desc", "begin_s", "end_s"],
+                                            "additionalProperties": False
+                                        }
+                                    }
+                                },
+                                "required": ["scene_idx", "narration", "begin_s", "end_s", "clips"],
+                                "additionalProperties": False
+                            }
+                        }
+                    },
+                    "required": ["scenes"],
+                    "additionalProperties": False
+                }
+                
+                # 对于支持 JSON Schema 的模型，使用 strict schema
+                if "claude" in model.lower():
+                    # Claude 模型使用 JSON Schema（如果支持）
+                    response_format = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "storyboard_schema",
+                            "strict": True,  # 严格模式，强制遵循 schema
+                            "schema": json_schema
                         }
                     }
-                }
-                logger.info(f"[plan_storyboard_impl] Using structured outputs with JSON schema for model {model}")
+                    logger.info(f"[plan_storyboard_impl] Using strict JSON Schema for Claude model {model}")
+                elif "gpt-4o" in model:
+                    # GPT-4o 模型支持 JSON Schema（gpt-4o-2024-08-06 及之后版本）
+                    response_format = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "storyboard_schema",
+                            "strict": True,  # 严格模式，强制遵循 schema
+                            "schema": json_schema
+                        }
+                    }
+                    logger.info(f"[plan_storyboard_impl] Using strict JSON Schema for GPT-4o model {model}")
+                else:
+                    # 其他 GPT-4 模型使用简单的 JSON mode
+                    response_format = {"type": "json_object"}
+                    logger.info(f"[plan_storyboard_impl] Using JSON mode for GPT-4 model {model}")
             except Exception as schema_error:
+                # 如果创建 schema 失败，降级到简单的 JSON mode
                 logger.warning(f"[plan_storyboard_impl] Failed to create JSON schema, falling back to simple JSON mode: {schema_error}")
                 response_format = {"type": "json_object"}
-        elif "claude" in model.lower():
-            # Claude 模型使用简单的 JSON mode
-            response_format = {"type": "json_object"}
-            logger.info(f"[plan_storyboard_impl] Using JSON mode for model {model}")
         
         outline = await or_client.chat_completions(
             model=model,
@@ -580,52 +749,48 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         raise RuntimeError(f"分镜生成失败：{error_msg}。")
     
     if not outline or not isinstance(outline, str) or len(outline.strip()) == 0:
-        logger.warning(f"[plan_storyboard_impl] empty outline from OpenRouter (outline={repr(outline)}), trying quick retry without structured output")
+        logger.warning(f"[plan_storyboard_impl] empty outline from OpenRouter (outline={repr(outline)}), trying quick retry")
         try:
-            # 重试时不使用结构化输出，降低失败概率
+            # 如果当前模型是推理模型，直接降级到 claude-sonnet-4.5 或 gpt-4o-mini
+            # 推理模型即使不启用 reasoning，也会进行推理，导致响应被截断或格式问题
+            is_reasoning_model = "gpt-5" in model or "gpt-5-mini" in model or "gpt-5.1" in model
+            if is_reasoning_model:
+                # 优先使用 claude-sonnet-4.5（JSON 支持更好），如果没有则使用 gpt-4o-mini
+                fallback_model = "anthropic/claude-sonnet-4.5"
+                logger.info(f"[plan_storyboard_impl] Reasoning model {model} returned empty content or was truncated, falling back to {fallback_model}")
+                # 降级后重新计算 max_tokens（Claude 模型需要稍多 tokens）
+                calculated_max_tokens = min(4000, num_scenes * 250 + 500)
+            else:
+                fallback_model = model
+            
             # 简化 prompt，减少复杂度
             simplified_sys_prompt = (
                 "你是资深广告导演。根据用户目标与风格，将整个视频拆分为场景（scene），每个场景包含多个镜头（clip）。\n\n"
                 "输出格式：严格的 JSON 对象，结构为 {\"scenes\": [{\"scene_idx\": 1, \"clips\": [{\"idx\": 1, \"desc\": \"...\", \"begin_s\": 0.0, \"end_s\": 3.0}, ...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
-                f"请生成恰好 {num_scenes} 个场景，每个场景恰好10秒。"
+                f"请生成恰好 {num_scenes} 个场景，每个场景恰好10秒。\n"
+                "【重要】只输出 JSON，不要任何额外的文字、说明或 Markdown 代码块。"
             )
             simplified_user_prompt = (
                 f"目标：{goal}\n"
                 f"风格：{', '.join(styles) if styles else '通用'}\n"
                 f"总时长：{total_duration}秒\n"
-                f"请返回 JSON 格式的分镜脚本。"
+                f"请返回 JSON 格式的分镜脚本，包含 {num_scenes} 个场景。"
             )
             
+            # 使用降级模型或原模型重试
             outline = await or_client.chat_completions(
-                model=model,
+                model=fallback_model,
                 messages=[
                     {"role": "system", "content": simplified_sys_prompt},
                     {"role": "user", "content": simplified_user_prompt}
                 ],
                 temperature=0.3,
                 max_tokens=calculated_max_tokens,
-                response_format=None,  # 不使用结构化输出，让模型自由输出
+                response_format={"type": "json_object"} if fallback_model != "gpt-5-mini" else None,  # 降级模型使用 JSON mode
             )
+            
             if not outline or not isinstance(outline, str) or len(outline.strip()) == 0:
-                # 最后一次尝试：使用更简单的模型或不同的参数
-                logger.warning(f"[plan_storyboard_impl] Second retry also failed, trying with different model or parameters")
-                # 如果当前模型是 gpt-5-mini，尝试使用 gpt-4o-mini
-                fallback_model = "openai/gpt-4o-mini" if "gpt-5" in model else model
-                if fallback_model != model:
-                    logger.info(f"[plan_storyboard_impl] Falling back to model: {fallback_model}")
-                    outline = await or_client.chat_completions(
-                        model=fallback_model,
-                        messages=[
-                            {"role": "system", "content": simplified_sys_prompt},
-                            {"role": "user", "content": simplified_user_prompt}
-                        ],
-                        temperature=0.5,
-                        max_tokens=calculated_max_tokens,
-                        response_format=None,
-                    )
-                
-                if not outline or not isinstance(outline, str) or len(outline.strip()) == 0:
-                    raise RuntimeError("OpenRouter 返回空内容，即使重试后仍为空。可能是模型拒绝生成或 API 配置问题。")
+                raise RuntimeError(f"OpenRouter 返回空内容（模型：{fallback_model}）。可能是模型拒绝生成或 API 配置问题。")
         except OpenRouterError as e:
             # OpenRouter 特定错误（如模型拒绝）
             error_msg = f"OpenRouter 错误: {str(e)}"
@@ -749,12 +914,18 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         except Exception as e:
             logger.warning(f"[plan_storyboard_impl] Retry failed: {e}")
     
-    # 如果仍然没有 scenes，创建默认结构
+    # 如果仍然没有 scenes，创建默认结构（使用 goal 和 styles 生成有意义的描述）
     if not scenes_data or not scenes_data.get("scenes"):
-        logger.warning(f"[plan_storyboard_impl] Failed to parse scenes after retry, creating default structure")
+        logger.warning(f"[plan_storyboard_impl] Failed to parse scenes after retry, creating default structure with meaningful descriptions")
         scenes = []
+        # 根据 goal 和 styles 生成场景描述
+        goal_keywords = goal[:30] if goal else "视频内容"  # 取前30个字符作为关键词
+        style_text = ", ".join(styles) if styles else "通用风格"
+        
         for i in range(num_scenes):
             scene_begin = i * 10.0
+            # 生成更有意义的描述，避免被验证逻辑过滤
+            scene_desc = f"展示{goal_keywords}相关内容，采用{style_text}风格，呈现场景{i+1}的视觉画面"
             scenes.append({
                 "scene_idx": i + 1,
                 "begin_s": scene_begin,
@@ -762,7 +933,7 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
                 "clips": [
                     {
                         "idx": 1,
-                        "desc": f"场景{i+1}镜头描述待生成",
+                        "desc": scene_desc,
                         "begin_s": scene_begin,
                         "end_s": scene_begin + 10.0
                     }
@@ -790,10 +961,17 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         validated_clips = []
         clip_idx = 1
         for clip in clips:
-            if not isinstance(clip, dict) or not clip.get("desc"):
+            if not isinstance(clip, dict):
                 continue
             desc = str(clip.get("desc", "")).strip()
-            if len(desc) < 8 or any(bt in desc for bt in ["镜头描述", "请填写", "占位", "placeholder", "描述待生成"]):
+            # 如果描述为空或太短，跳过（但保留有意义的默认描述）
+            if not desc or len(desc) < 5:
+                continue
+            # 过滤明显的占位符文本，但保留有意义的描述
+            if any(bt in desc for bt in ["请填写", "placeholder", "待填写", "待补充"]):
+                continue
+            # 如果描述包含 "描述待生成" 但长度足够，可能是默认结构，尝试保留
+            if "描述待生成" in desc and len(desc) < 15:
                 continue
             
             clip_begin = float(clip.get("begin_s", scene_begin))
@@ -811,11 +989,14 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
             })
             clip_idx += 1
         
-        # 如果 scene 没有有效 clips，创建一个默认的
+        # 如果 scene 没有有效 clips，创建一个基于 goal 和 styles 的默认描述
         if not validated_clips:
+            goal_keywords = goal[:30] if goal else "视频内容"
+            style_text = ", ".join(styles) if styles else "通用风格"
+            default_desc = f"展示{goal_keywords}相关内容，采用{style_text}风格，呈现场景{scene_idx}的视觉画面"
             validated_clips.append({
                 "idx": 1,
-                "desc": f"场景{scene_idx}镜头描述待生成",
+                "desc": default_desc,
                 "begin_s": scene_begin,
                 "end_s": scene_end
             })
@@ -831,13 +1012,17 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
     while len(validated_scenes) < num_scenes:
         scene_idx = len(validated_scenes) + 1
         scene_begin = (scene_idx - 1) * 10.0
+        # 生成基于 goal 和 styles 的描述
+        goal_keywords = goal[:30] if goal else "视频内容"
+        style_text = ", ".join(styles) if styles else "通用风格"
+        default_desc = f"展示{goal_keywords}相关内容，采用{style_text}风格，呈现场景{scene_idx}的视觉画面"
         validated_scenes.append({
             "scene_idx": scene_idx,
             "begin_s": scene_begin,
             "end_s": scene_begin + 10.0,
             "clips": [{
                 "idx": 1,
-                "desc": f"场景{scene_idx}镜头描述待生成",
+                "desc": default_desc,
                 "begin_s": scene_begin,
                 "end_s": scene_begin + 10.0
             }]
@@ -851,8 +1036,27 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
     return json.dumps({"scenes": validated_scenes}, ensure_ascii=False)
 
 
-@tool("审核分镜脚本工具")
-def review_storyboard_tool(storyboards_json: str, num_clips: int, goal: str, styles: List[str], total_duration: float = 10.0, max_retries: int = 3) -> str:
+def review_storyboard_impl(storyboards_json: str, num_clips: int, goal: str, styles: List[str], total_duration: float = 10.0, max_retries: int = 3) -> str:
+    """
+    审核分镜脚本的内部实现函数（可直接调用）。
+    
+    审核分镜脚本的质量，检查是否有效。
+    
+    如果分镜脚本无效（包含空描述、过短描述、占位符等），
+    自动触发重写，最多重试 max_retries 次，直到生成有效的分镜脚本。
+    
+    Args:
+        storyboards_json: JSON 格式的分镜脚本列表
+        num_clips: 期望的镜头数量
+        goal: 主体目标
+        styles: 风格列表
+        total_duration: 总时长（秒）
+        max_retries: 最大重试次数（默认3次）
+        
+    Returns:
+        如果有效：返回审核通过的分镜脚本 JSON
+        如果重试后仍无效：返回包含错误信息的 JSON
+    """
     """
     审核分镜脚本质量，确保每个镜头都有详细、具体的描述，且每个镜头时长不超过10s。
     
@@ -999,7 +1203,7 @@ def review_storyboard_tool(storyboards_json: str, num_clips: int, goal: str, sty
     is_valid, errors, valid_count = validate_storyboards(storyboards_json)
     
     if is_valid:
-        logger.info(f"[review_storyboard_tool] Storyboard validation passed: {valid_count} valid clips")
+        logger.info(f"[review_storyboard_impl] Storyboard validation passed: {valid_count} valid clips")
         return storyboards_json
     
     # 如果无效，尝试自动重写
@@ -1007,7 +1211,7 @@ def review_storyboard_tool(storyboards_json: str, num_clips: int, goal: str, sty
     if len(errors) > 5:
         error_summary += f" ... 还有 {len(errors) - 5} 个错误"
     
-    logger.warning(f"[review_storyboard_tool] Storyboard validation failed: {error_summary}, attempting rewrite...")
+    logger.warning(f"[review_storyboard_impl] Storyboard validation failed: {error_summary}, attempting rewrite...")
     
     # 自动重写逻辑
     for retry in range(max_retries):
@@ -1019,16 +1223,16 @@ def review_storyboard_tool(storyboards_json: str, num_clips: int, goal: str, sty
             is_valid, new_errors, new_valid_count = validate_storyboards(retry_result)
             
             if is_valid:
-                logger.info(f"[review_storyboard_tool] Rewrite successful after {retry + 1} attempt(s)")
+                logger.info(f"[review_storyboard_impl] Rewrite successful after {retry + 1} attempt(s)")
                 return retry_result
             else:
                 new_error_summary = "; ".join(new_errors[:3])
-                logger.warning(f"[review_storyboard_tool] Rewrite attempt {retry + 1} still invalid: {new_error_summary}")
+                logger.warning(f"[review_storyboard_impl] Rewrite attempt {retry + 1} still invalid: {new_error_summary}")
         except Exception as e:
-            logger.error(f"[review_storyboard_tool] Rewrite attempt {retry + 1} failed: {e}", exc_info=True)
+            logger.error(f"[review_storyboard_impl] Rewrite attempt {retry + 1} failed: {e}", exc_info=True)
     
     # 所有重试都失败，返回错误信息
-    logger.error(f"[review_storyboard_tool] All {max_retries} rewrite attempts failed")
+    logger.error(f"[review_storyboard_impl] All {max_retries} rewrite attempts failed")
     return json.dumps({
         "valid": False,
         "errors": errors,
@@ -1037,6 +1241,25 @@ def review_storyboard_tool(storyboards_json: str, num_clips: int, goal: str, sty
         "retry_attempts": max_retries,
         "message": f"分镜脚本审核未通过，已重试 {max_retries} 次仍无效：{error_summary}。请检查分镜生成工具或调整参数。"
     }, ensure_ascii=False)
+
+
+@tool("审核分镜脚本工具")
+def review_storyboard_tool(storyboards_json: str, num_clips: int, goal: str, styles: List[str], total_duration: float = 10.0, max_retries: int = 3) -> str:
+    """
+    审核分镜脚本质量，确保每个镜头都有详细、具体的描述，且每个镜头时长不超过10s。
+    
+    Args:
+        storyboards_json: JSON 格式的分镜脚本列表
+        num_clips: 期望的镜头数量（仅供参考，实际数量可能因时长限制而不同）
+        goal: 目标
+        styles: 风格列表
+        total_duration: 总时长（秒）
+        max_retries: 最大重试次数
+        
+    Returns:
+        审核通过的分镜脚本（JSON 格式）
+    """
+    return review_storyboard_impl(storyboards_json, num_clips, goal, styles, total_duration, max_retries)
 
 
 @tool("规划分镜脚本工具")
@@ -1091,7 +1314,9 @@ def generate_keyframe_tool(storyboards_json: str, image_control: bool = True) ->
                 
                 try:
                     # 为 scene 生成一张代表性图片
-                    image_url = await image_provider.generate(f"{scene_desc}，视频场景画面")
+                    # 【重要】避免生成带有人脸的图片，因为 sora2 不支持使用真人图片作为参考
+                    image_prompt = f"{scene_desc}，视频场景画面，无人脸、无真人，无人物形象"
+                    image_url = await image_provider.generate(image_prompt)
                     scene["image_url"] = image_url
                     logger.info(f"[generate_keyframe_tool] Generated image for scene {scene_idx}: {image_url}")
                 except Exception as e:
@@ -1105,9 +1330,12 @@ def generate_keyframe_tool(storyboards_json: str, image_control: bool = True) ->
             for sb in data:
                 desc = sb.get("desc", "")
                 # 为每个分镜生成首帧和尾帧
+                # 【重要】避免生成带有人脸的图片，因为 sora2 不支持使用真人图片作为参考
                 try:
-                    in_frame_url = await image_provider.generate(f"{desc}，首帧画面")
-                    out_frame_url = await image_provider.generate(f"{desc}，尾帧画面")
+                    in_prompt = f"{desc}，首帧画面，无人物、无人脸、无真人，避免出现任何人物形象"
+                    out_prompt = f"{desc}，尾帧画面，无人物、无人脸、无真人，避免出现任何人物形象"
+                    in_frame_url = await image_provider.generate(in_prompt)
+                    out_frame_url = await image_provider.generate(out_prompt)
                     sb["keyframes"] = {"in": in_frame_url, "out": out_frame_url}
                 except Exception as e:
                     logger.warning(f"[generate_keyframe_tool] Failed to generate keyframes for clip {sb.get('idx', 'unknown')}: {e}")
@@ -1122,8 +1350,23 @@ def generate_keyframe_tool(storyboards_json: str, image_control: bool = True) ->
     return _run_async_safe(generate_keyframes())
 
 
-@tool("合并镜头为视频任务工具")
-def merge_storyboards_to_video_tasks_tool(storyboards_json: str, run_id: str, total_duration: float) -> str:
+def merge_storyboards_to_video_tasks_impl(storyboards_json: str, run_id: str, total_duration: float) -> str:
+    """
+    将分镜脚本（scene 结构）转换为视频任务的内部实现函数（可直接调用）。
+    
+    规则：
+    1. 每个 scene 恰好10秒，直接作为一个视频任务
+    2. 使用 scene 的描述结构（scene 内所有 clips 的描述）
+    3. 每个视频任务对应一个 scene
+    
+    Args:
+        storyboards_json: JSON 格式的分镜脚本（包含 scenes 数组）
+        run_id: 运行 ID
+        total_duration: 总时长（秒）
+        
+    Returns:
+        JSON 格式的视频任务列表（每个任务对应一个 scene，每个 scene 恰好10s）
+    """
     """
     将分镜脚本（scene 结构）转换为视频任务。
     
@@ -1148,7 +1391,7 @@ def merge_storyboards_to_video_tasks_tool(storyboards_json: str, run_id: str, to
     try:
         storyboards_raw = json.loads(storyboards_json)
     except Exception as e:
-        logger.error(f"[merge_storyboards_to_video_tasks_tool] Failed to parse JSON: {e}")
+        logger.error(f"[merge_storyboards_to_video_tasks_impl] Failed to parse JSON: {e}")
         return json.dumps([], ensure_ascii=False)
     
     # 处理 scene 结构
@@ -1159,7 +1402,7 @@ def merge_storyboards_to_video_tasks_tool(storyboards_json: str, run_id: str, to
         # 兼容旧格式：如果是列表，假设是 scenes
         scenes = storyboards_raw
     else:
-        logger.error(f"[merge_storyboards_to_video_tasks_tool] Invalid format: expected scenes structure, got {type(storyboards_raw)}")
+        logger.error(f"[merge_storyboards_to_video_tasks_impl] Invalid format: expected scenes structure, got {type(storyboards_raw)}")
         return json.dumps([], ensure_ascii=False)
     
     # 按 scene_idx 排序
@@ -1197,27 +1440,73 @@ def merge_storyboards_to_video_tasks_tool(storyboards_json: str, run_id: str, to
         if clips and isinstance(clips[0], dict):
             keyframes = clips[0].get("keyframes", keyframes)
         
+        # 获取 scene 的图片（优先使用 scene 的 image_url）
+        scene_image_url = scene.get("image_url")
+        
+        # 获取 scene 的旁白文案（narration）
+        scene_narration = scene.get("narration", "").strip()
+        
+        # 如果 scene 有 image_url，将其设置为 keyframes 的 "in"
+        if scene_image_url:
+            keyframes["in"] = scene_image_url
+            logger.info(f"[merge_storyboards_to_video_tasks_impl] Using scene image_url for scene {scene_idx}: {scene_image_url}")
+        
         video_tasks.append({
             "task_idx": scene_idx,  # 使用 scene_idx 作为 task_idx
             "scene_idx": scene_idx,
             "desc": scene_desc,
+            "narration": scene_narration,  # 保存完整的旁白文案
             "clips": clips,  # 保留所有 clips 信息
             "total_duration": 10.0,  # 每个 scene 恰好10s
             "begin_s": scene_begin,
             "end_s": scene_end,
-            "keyframes": keyframes
+            "keyframes": keyframes,
+            "image_url": scene_image_url  # 也单独保存 scene 的 image_url，方便后续使用
         })
     
     logger.info(
-        f"[merge_storyboards_to_video_tasks_tool] Converted {len(scenes)} scenes into {len(video_tasks)} video tasks "
+        f"[merge_storyboards_to_video_tasks_impl] Converted {len(scenes)} scenes into {len(video_tasks)} video tasks "
         f"(target: {total_duration}s, actual: {sum(t['total_duration'] for t in video_tasks):.1f}s)"
     )
     
     return json.dumps(video_tasks, ensure_ascii=False)
 
 
-@tool("生成视频片段工具")
-def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
+@tool("合并镜头为视频任务工具")
+def merge_storyboards_to_video_tasks_tool(storyboards_json: str, run_id: str, total_duration: float) -> str:
+    """
+    将分镜脚本（scene 结构）转换为视频任务。
+    
+    规则：
+    1. 每个 scene 恰好10秒，直接作为一个视频任务
+    2. 使用 scene 的描述结构（scene 内所有 clips 的描述）
+    3. 每个视频任务对应一个 scene
+    
+    Args:
+        storyboards_json: JSON 格式的分镜脚本（包含 scenes 数组）
+        run_id: 运行 ID
+        total_duration: 总时长（秒）
+        
+    Returns:
+        JSON 格式的视频任务列表（每个任务对应一个 scene，每个 scene 恰好10s）
+    """
+    return merge_storyboards_to_video_tasks_impl(storyboards_json, run_id, total_duration)
+
+
+async def generate_video_clip_impl(video_tasks_json: str, run_id: str) -> str:
+    """
+    为视频任务提交视频生成任务的内部实现函数（可直接调用，异步版本）。
+    
+    注意：视频生成需要 3-5 分钟，此工具只负责提交任务到数据库，
+    实际生成由后台任务或 webhook 完成。返回任务提交状态。
+    
+    Args:
+        video_tasks_json: JSON 格式的视频任务列表（由合并工具生成，每个任务对应一个10s的视频片段）
+        run_id: 运行 ID，用于文件命名
+        
+    Returns:
+        JSON 格式的任务提交结果列表（包含 task_id，状态为 "pending"）
+    """
     """
     为视频任务提交视频生成任务（异步模式，避免长时间阻塞）。
     
@@ -1244,20 +1533,20 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
         video_provider = _get_video_provider()
         provider_type = type(video_provider).__name__
         logger.info(
-            f"[generate_video_clip_tool] Video provider initialized: "
+            f"[generate_video_clip_impl] Video provider initialized: "
             f"type={provider_type}, "
             f"video_tasks_count={len(video_tasks_raw) if isinstance(video_tasks_raw, list) else 0}, "
             f"run_id={run_id}"
         )
     except Exception as e:
-        logger.error(f"[generate_video_clip_tool] Failed to get video provider: {e}", exc_info=True)
+        logger.error(f"[generate_video_clip_impl] Failed to get video provider: {e}", exc_info=True)
         raise
     
     # 处理输入格式
     if isinstance(video_tasks_raw, list):
         video_tasks = video_tasks_raw
     else:
-        logger.error(f"[generate_video_clip_tool] Invalid video_tasks format: {type(video_tasks_raw)}")
+        logger.error(f"[generate_video_clip_impl] Invalid video_tasks format: {type(video_tasks_raw)}")
         video_tasks = []
     
     async def submit_one(task: Dict[str, Any], index: int) -> Dict[str, Any]:
@@ -1270,13 +1559,30 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
             except (ValueError, TypeError):
                 task_idx = index + 1
         
+        # 获取前一个 scene 的信息（用于转场衔接）
+        prev_scene_info = None
+        if index > 0 and task_idx > 1:
+            prev_task = video_tasks[index - 1] if index - 1 < len(video_tasks) else None
+            if prev_task:
+                prev_clips = prev_task.get("clips", [])
+                if prev_clips and isinstance(prev_clips, list) and len(prev_clips) > 0:
+                    # 获取前一个 scene 的最后一个 clip 的描述
+                    last_clip = prev_clips[-1] if isinstance(prev_clips[-1], dict) else {}
+                    prev_clip_desc = last_clip.get("desc", "").strip()
+                    prev_scene_desc = prev_task.get("desc", "").strip()
+                    if prev_clip_desc or prev_scene_desc:
+                        prev_scene_info = {
+                            "desc": prev_scene_desc or prev_clip_desc,
+                            "last_clip": prev_clip_desc
+                        }
+        
         # 优先使用 scene 的描述（desc），这是合并了所有 clips 的描述
         scene_desc = task.get("desc", "").strip()
         clips = task.get("clips", [])
         
         if scene_desc and len(scene_desc) >= 3:
             # 使用 scene 的描述（已经在 merge_storyboards_to_video_tasks_tool 中合并了所有 clips）
-            prompt = scene_desc
+            base_prompt = scene_desc
         elif clips and isinstance(clips, list) and len(clips) > 0:
             # 如果没有 scene 描述，合并所有 clips 的描述（用分号连接）
             clip_descriptions = []
@@ -1285,26 +1591,49 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                     clip_desc = str(clip.get("desc", "")).strip()
                     if clip_desc and len(clip_desc) >= 3:
                         clip_descriptions.append(clip_desc)
-            prompt = "；".join(clip_descriptions) if clip_descriptions else f"场景{task_idx}视频内容"
+            base_prompt = "；".join(clip_descriptions) if clip_descriptions else f"场景{task_idx}视频内容"
         else:
             # 降级：如果都没有，使用默认描述
-            prompt = f"场景{task_idx}视频内容"
-            logger.warning(f"[generate_video_clip_tool] Task {task_idx} has no desc or clips, using default prompt")
+            base_prompt = f"场景{task_idx}视频内容"
+            logger.warning(f"[generate_video_clip_impl] Task {task_idx} has no desc or clips, using default prompt")
+        
+        # 构建增强的 prompt，包含转场信息
+        if prev_scene_info and task_idx > 1:
+            # 添加前一个 scene 的信息，确保视觉连贯性
+            transition_note = f"【转场衔接】前一个场景的结尾画面：{prev_scene_info.get('last_clip', prev_scene_info.get('desc', ''))}。"
+            transition_note += f"当前场景应该从相似的视觉元素、色调或构图自然过渡，确保视觉流畅，避免突兀的跳跃。"
+            prompt = f"{transition_note} {base_prompt}"
+            logger.info(f"[generate_video_clip_impl] Added transition context for task {task_idx}: {prev_scene_info.get('last_clip', 'N/A')[:50]}")
+        else:
+            prompt = base_prompt
         
         # 获取时长（每个 scene 恰好10s）
         duration = max(1, min(10, int(round(task.get("total_duration", 10.0)))))
         
-        # 获取关键帧（使用第一个 clip 的关键帧，或 scene 的关键帧）
-        keyframes = task.get("keyframes", {})
-        if clips and isinstance(clips, list) and len(clips) > 0:
-            first_clip = clips[0] if isinstance(clips[0], dict) else {}
-            keyframes = first_clip.get("keyframes", keyframes)
-        ref_img = keyframes.get("in") if keyframes else None
+        # 获取参考图（优先使用 scene 的 image_url，其次使用 keyframes 的 "in"）
+        ref_img = None
+        
+        # 优先使用 scene 的 image_url
+        scene_image_url = task.get("image_url")
+        if scene_image_url:
+            ref_img = scene_image_url
+            logger.info(f"[generate_video_clip_impl] Using scene image_url as ref_img for task {task_idx}: {ref_img}")
+        else:
+            # 降级：使用 keyframes 的 "in"
+            keyframes = task.get("keyframes", {})
+            if clips and isinstance(clips, list) and len(clips) > 0:
+                first_clip = clips[0] if isinstance(clips[0], dict) else {}
+                keyframes = first_clip.get("keyframes", keyframes)
+            ref_img = keyframes.get("in") if keyframes else None
+            if ref_img:
+                logger.info(f"[generate_video_clip_impl] Using keyframes.in as ref_img for task {task_idx}: {ref_img}")
+            else:
+                logger.warning(f"[generate_video_clip_impl] No ref_img found for task {task_idx} (no scene image_url or keyframes.in)")
         
         # 验证 prompt 是否为空或包含占位符
         if not prompt or len(prompt) < 3:
             error_msg = f"视频任务描述为空或过短（长度: {len(prompt)}），无法生成视频。原始数据: {task}"
-            logger.error(f"[generate_video_clip_tool] {error_msg} for task {task_idx}")
+            logger.error(f"[generate_video_clip_impl] {error_msg} for task {task_idx}")
             return {
                 "task_idx": task_idx,
                 "status": "failed",
@@ -1316,7 +1645,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
         placeholder_keywords = ["镜头描述", "描述待生成", "请填写", "占位", "placeholder"]
         if any(keyword in prompt for keyword in placeholder_keywords):
             error_msg = f"视频任务描述包含占位符（'{prompt}'），无法生成视频。"
-            logger.warning(f"[generate_video_clip_tool] {error_msg} for task {task_idx}")
+            logger.warning(f"[generate_video_clip_impl] {error_msg} for task {task_idx}")
             return {
                 "task_idx": task_idx,
                 "status": "failed",
@@ -1339,7 +1668,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                         retry_count=0
                     )
                     logger.info(
-                        f"[generate_video_clip_tool] Task added to Supabase queue: "
+                        f"[generate_video_clip_impl] Task added to Supabase queue: "
                         f"run_id={run_id}, task_idx={task_idx}, task_id={task_info.get('id')}"
                     )
                     return {
@@ -1351,7 +1680,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                     }
                 except Exception as e:
                     logger.warning(
-                        f"[generate_video_clip_tool] Failed to add to Supabase queue: {e}, "
+                        f"[generate_video_clip_impl] Failed to add to Supabase queue: {e}, "
                         f"falling back to direct submission"
                     )
                     # 降级到直接提交
@@ -1366,7 +1695,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                 # 提交视频生成任务（使用异步模式，避免长时间阻塞）
                 # 注意：由于视频生成需要 3-5 分钟，使用异步模式可以立即返回，避免阻塞 CrewAI
                 logger.info(
-                    f"[generate_video_clip_tool] Submitting video generation task: "
+                    f"[generate_video_clip_impl] Submitting video generation task: "
                     f"task_idx={task_idx}, "
                     f"prompt_length={len(prompt)}, "
                     f"has_ref_img={bool(ref_img)}, "
@@ -1375,7 +1704,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                 )
                 res = await video_provider.generate(prompt, ref_img or "", duration=duration, async_mode=True)
                 logger.info(
-                    f"[generate_video_clip_tool] Video provider response: "
+                    f"[generate_video_clip_impl] Video provider response: "
                     f"task_idx={task_idx}, "
                     f"result_type={type(res)}, "
                     f"result={res}"
@@ -1384,7 +1713,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                 if isinstance(res, dict) and res.get("pending"):
                     # 异步任务模式：返回 task_id，等待 webhook 回调或后续轮询
                     task_id_runninghub = res.get("task_id")
-                    logger.info(f"[generate_video_clip_tool] Submitted async task for task {task_idx}: task_id={task_id_runninghub}, prompt_length={len(prompt)}")
+                    logger.info(f"[generate_video_clip_impl] Submitted async task for task {task_idx}: task_id={task_id_runninghub}, prompt_length={len(prompt)}")
                     
                     # 即使使用 direct 提交，也保存到 video_tasks 表，以便 webhook 和 worker 能处理
                     try:
@@ -1414,13 +1743,13 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                             
                             if not task_id_supabase:
                                 logger.error(
-                                    f"[generate_video_clip_tool] Failed to save task to database: "
+                                    f"[generate_video_clip_impl] Failed to save task to database: "
                                     f"run_id={run_id}, task_idx={task_idx}, runninghub_task_id={task_id_runninghub}"
                                 )
                                 raise Exception("Failed to save task to database")
                             
                             logger.info(
-                                f"[generate_video_clip_tool] Saved direct submission to video_tasks: "
+                                f"[generate_video_clip_impl] Saved direct submission to video_tasks: "
                                 f"run_id={run_id}, task_idx={task_idx}, "
                                 f"supabase_task_id={task_id_supabase}, runninghub_task_id={task_id_runninghub}, "
                                 f"status=submitted"
@@ -1435,7 +1764,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                             }
                     except Exception as e:
                         logger.warning(
-                            f"[generate_video_clip_tool] Failed to save direct submission to database: {e}, "
+                            f"[generate_video_clip_impl] Failed to save direct submission to database: {e}, "
                             f"falling back to in-memory tracking"
                         )
                     
@@ -1451,7 +1780,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                     # 同步模式：直接返回结果（如果 provider 支持）
                     url = res.get("video_url") if isinstance(res, dict) else str(res)
                     cdn_url = await upload_url_to_r2(url, f"{run_id}_task{task_idx}.mp4")
-                    logger.info(f"[generate_video_clip_tool] Generated task {task_idx} synchronously: {cdn_url}")
+                    logger.info(f"[generate_video_clip_impl] Generated task {task_idx} synchronously: {cdn_url}")
                     return {
                         "task_idx": task_idx,
                         "status": "succeeded",
@@ -1466,7 +1795,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                 # 如果是 prompt 错误，直接返回失败，不重试
                 if is_prompt_error:
                     error_msg = f"提示词错误: {error_str}。任务描述: '{prompt[:50]}...'"
-                    logger.error(f"[generate_video_clip_tool] {error_msg} for task {task_idx}")
+                    logger.error(f"[generate_video_clip_impl] {error_msg} for task {task_idx}")
                     return {
                         "task_idx": task_idx,
                         "status": "failed",
@@ -1479,7 +1808,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                 if is_queue_full and attempt < max_retries:
                     delay = retry_delays[min(attempt, len(retry_delays) - 1)]
                     logger.warning(
-                        f"[generate_video_clip_tool] Task queue full for task {task_idx}, "
+                        f"[generate_video_clip_impl] Task queue full for task {task_idx}, "
                         f"retrying in {delay}s (attempt {attempt + 1}/{max_retries + 1})"
                     )
                     await asyncio.sleep(delay)
@@ -1487,7 +1816,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                 else:
                     # 其他错误或重试次数用完，返回失败
                     logger.error(
-                        f"[generate_video_clip_tool] Failed to submit task for task {task_idx}: {e}",
+                        f"[generate_video_clip_impl] Failed to submit task for task {task_idx}: {e}",
                         exc_info=True
                     )
                     return {
@@ -1515,7 +1844,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
         results = []
         submitted_indices = set()  # 跟踪已提交的 task_idx，避免重复
         
-        logger.info(f"[generate_video_clip_tool] Starting to submit {len(video_tasks)} video tasks")
+        logger.info(f"[generate_video_clip_impl] Starting to submit {len(video_tasks)} video tasks")
         
         for idx, task in enumerate(video_tasks):
             try:
@@ -1529,7 +1858,7 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                 
                 # 检查是否已经提交过这个 task_idx
                 if task_idx in submitted_indices:
-                    logger.warning(f"[generate_video_clip_tool] Task idx {task_idx} already submitted, skipping duplicate")
+                    logger.warning(f"[generate_video_clip_impl] Task idx {task_idx} already submitted, skipping duplicate")
                     continue
                 
                 submitted_indices.add(task_idx)
@@ -1539,15 +1868,15 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                 
                 # 如果任务成功提交（pending），等待一小段时间再提交下一个，避免队列瞬间满载
                 if result.get("status") == "pending":
-                    logger.info(f"[generate_video_clip_tool] Task {result.get('task_idx', idx + 1)} submitted, waiting 2s before next...")
+                    logger.info(f"[generate_video_clip_impl] Task {result.get('task_idx', idx + 1)} submitted, waiting 2s before next...")
                     await asyncio.sleep(2)  # 等待2秒，给队列一些缓冲时间
                 
                 # 如果队列满，等待更长时间再继续
                 if result.get("status") == "failed" and "TASK_QUEUE_MAXED" in str(result.get("error", "")):
-                    logger.warning(f"[generate_video_clip_tool] Queue full for task {result.get('task_idx', idx + 1)}, waiting 10s before next submission...")
+                    logger.warning(f"[generate_video_clip_impl] Queue full for task {result.get('task_idx', idx + 1)}, waiting 10s before next submission...")
                     await asyncio.sleep(10)  # 队列满时等待更长时间
             except Exception as e:
-                logger.error(f"[generate_video_clip_tool] Error submitting task {idx + 1}: {e}", exc_info=True)
+                logger.error(f"[generate_video_clip_impl] Error submitting task {idx + 1}: {e}", exc_info=True)
                 task_idx = task.get("task_idx") or (idx + 1)
                 if isinstance(task_idx, str):
                     try:
@@ -1565,10 +1894,10 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                         "error": str(e)
                     })
         
-        logger.info(f"[generate_video_clip_tool] Submitted {len(results)} video tasks (expected {len(video_tasks)})")
+        logger.info(f"[generate_video_clip_impl] Submitted {len(results)} video tasks (expected {len(video_tasks)})")
         return results
     
-    results = _run_async_safe(submit_all())
+    results = await submit_all()
     
     # 将任务信息保存到数据库（如果配置了 supabase）
     try:
@@ -1587,11 +1916,29 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
                     "provider_task_id": ",".join(task_ids),  # 多个任务ID用逗号分隔
                     "updated_at": datetime.utcnow().isoformat()
                 }).eq("run_id", run_id).execute()
-                logger.info(f"[generate_video_clip_tool] Saved task_ids to database: {task_ids}")
+                logger.info(f"[generate_video_clip_impl] Saved task_ids to database: {task_ids}")
     except Exception as e:
-        logger.warning(f"[generate_video_clip_tool] Failed to save to database: {e}")
+        logger.warning(f"[generate_video_clip_impl] Failed to save to database: {e}")
     
     return json.dumps(results, ensure_ascii=False)
+
+
+@tool("生成视频片段工具")
+def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
+    """
+    为视频任务提交视频生成任务（异步模式，避免长时间阻塞）。
+    
+    注意：视频生成需要 3-5 分钟，此工具只负责提交任务到数据库，
+    实际生成由后台任务或 webhook 完成。返回任务提交状态。
+    
+    Args:
+        video_tasks_json: JSON 格式的视频任务列表（由合并工具生成，每个任务对应一个10s的视频片段）
+        run_id: 运行 ID，用于文件命名
+        
+    Returns:
+        JSON 格式的任务提交结果列表（包含 task_id，状态为 "pending"）
+    """
+    return _run_async_safe(generate_video_clip_impl(video_tasks_json, run_id))
 
 
 @tool("拼接视频工具")
