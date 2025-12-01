@@ -1698,9 +1698,12 @@ async def crewai_chat(request: Request):
                     goal = payload.get("goal", "")
                     styles = payload.get("styles", [])
                     total_duration = float(payload.get("total_duration", 10.0))
+                    # 根据总时长计算分镜数量，确保每段不超过10秒
+                    import math
+                    num_clips = max(1, math.ceil(total_duration / 10.0))
                     
                     # plan_storyboard_impl 是异步函数，直接 await
-                    storyboard_json = await plan_storyboard_impl(goal, styles, total_duration, 1)
+                    storyboard_json = await plan_storyboard_impl(goal, styles, total_duration, num_clips)
                     
                     # 解析 storyboard 数据
                     storyboard_data = None
@@ -1808,7 +1811,9 @@ async def crewai_chat(request: Request):
                                                        delta="用户要求重新生成故事板，正在重新规划…"):
                                     yield chunk
                                 # 重新生成 storyboard（plan_storyboard_impl 是异步函数）
-                                storyboard_json = await plan_storyboard_impl(goal, styles, total_duration, 1)
+                                import math
+                                num_clips = max(1, math.ceil(total_duration / 10.0))
+                                storyboard_json = await plan_storyboard_impl(goal, styles, total_duration, num_clips)
                                 
                                 # 重新解析和生成图片
                                 try:
