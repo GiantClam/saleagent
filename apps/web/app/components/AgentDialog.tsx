@@ -32,6 +32,7 @@ export function AgentDialog({
   const [events, setEvents] = useState<EventItem[]>([]);
   const [innerRunId, setInnerRunId] = useState<string>("");
   const [loading, setLoading] = useState(false);
+  const [requiresConfirm, setRequiresConfirm] = useState(false);
   const [inputValue, setInputValue] = useState("");
   const esRef = useRef<EventSource | null>(null);
   const autoRef = useRef(false);
@@ -99,10 +100,16 @@ export function AgentDialog({
           });
           onEvent?.(evt);
           if (evt.type === "run_finished") {
-            const slug = (evt as any)?.payload?.share_slug as string | undefined;
-            onFinished?.(newRunId);
-            if (slug) {
-              try { (onFinished as any)?.({ runId: newRunId, shareSlug: slug }); } catch {}
+            const payload = (evt as any)?.payload || {};
+            const code = (payload?.code as string | undefined) || "";
+            if (code === "confirmation_required") {
+              setRequiresConfirm(true);
+            } else {
+              const slug = payload?.share_slug as string | undefined;
+              onFinished?.(newRunId);
+              if (slug) {
+                try { (onFinished as any)?.({ runId: newRunId, shareSlug: slug }); } catch {}
+              }
             }
           }
         } catch {}

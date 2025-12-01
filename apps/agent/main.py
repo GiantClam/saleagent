@@ -397,6 +397,25 @@ async def workflow_run_clips(request: Request):
     
     if not run_id or not storyboards_data:
         return {"error": "缺少 run_id 或 storyboards"}
+    import os
+    require_confirm = os.getenv("REQUIRE_HUMAN_CONFIRM", "true").lower() == "true"
+    if require_confirm:
+        try:
+            if supabase:
+                j = supabase.table("jobs").select("status").eq("run_id", run_id).single().execute()
+                status = (j.data or {}).get("status") if j and j.data else None
+                if status != "planning_confirmed":
+                    return {"error": "需要确认分镜方案后才能生成镜头", "code": "confirmation_required"}
+            else:
+                try:
+                    conf = getattr(confirm_storyboard, "_confirmations", {})
+                except Exception:
+                    conf = {}
+                s = conf.get(f"{run_id}_storyboard", {}).get("status")
+                if s != "confirmed":
+                    return {"error": "需要确认分镜方案后才能生成镜头", "code": "confirmation_required"}
+        except Exception:
+            pass
     
     storyboards = [ClipSpec(**s) for s in storyboards_data]
     sem = asyncio.Semaphore(4)
@@ -532,6 +551,25 @@ async def workflow_crew_run(body: CrewRunRequest):
         payload["run_id"] = f"r_{uuid.uuid4().hex[:8]}"
     
     run_id = payload["run_id"]
+    import os
+    require_confirm = os.getenv("REQUIRE_HUMAN_CONFIRM", "true").lower() == "true"
+    if require_confirm:
+        try:
+            if supabase:
+                j = supabase.table("jobs").select("status").eq("run_id", run_id).single().execute()
+                status = (j.data or {}).get("status") if j and j.data else None
+                if status != "planning_confirmed":
+                    return {"error": "需要人工确认后再启动工作流", "code": "confirmation_required", "run_id": run_id}
+            else:
+                try:
+                    conf = getattr(confirm_storyboard, "_confirmations", {})
+                except Exception:
+                    conf = {}
+                s = conf.get(f"{run_id}_storyboard", {}).get("status")
+                if s != "confirmed":
+                    return {"error": "需要人工确认后再启动工作流", "code": "confirmation_required", "run_id": run_id}
+        except Exception:
+            pass
     
     # 生成 session_id（用于回调关联）
     session_id = f"session_{run_id}_{int(datetime.utcnow().timestamp() * 1000)}"
@@ -973,6 +1011,33 @@ async def run_agent(request: Request):
                 return
             
             try:
+                import os
+                require_confirm = os.getenv("REQUIRE_HUMAN_CONFIRM", "true").lower() == "true"
+                if require_confirm:
+                    try:
+                        if supabase:
+                            j = supabase.table("jobs").select("status").eq("run_id", run_id).single().execute()
+                            status = (j.data or {}).get("status") if j and j.data else None
+                            if status != "planning_confirmed":
+                                async for chunk in emit("System", "info", run_id, thread_id, delta="📝 请先确认分镜方案（storyboard）后再继续执行"):
+                                    yield chunk
+                                async for chunk in emit("System", "run_finished", run_id, thread_id, delta="⏳ 等待人工确认…", payload={"code": "confirmation_required", "run_id": run_id}):
+                                    yield chunk
+                                return
+                        else:
+                            try:
+                                conf = getattr(confirm_storyboard, "_confirmations", {})
+                            except Exception:
+                                conf = {}
+                            s = conf.get(f"{run_id}_storyboard", {}).get("status")
+                            if s != "confirmed":
+                                async for chunk in emit("System", "info", run_id, thread_id, delta="📝 请先确认分镜方案（storyboard）后再继续执行"):
+                                    yield chunk
+                                async for chunk in emit("System", "run_finished", run_id, thread_id, delta="⏳ 等待人工确认…", payload={"code": "confirmation_required", "run_id": run_id}):
+                                    yield chunk
+                                return
+                    except Exception:
+                        pass
                 
                 # 准备 CrewAI 工作流参数
                 payload = {
@@ -1032,6 +1097,33 @@ async def run_agent(request: Request):
                                        delta="✅ 审核：检查分镜质量，合并镜头为视频任务…", 
                                        progress={"current": 3, "total": 6}):
                     yield chunk
+                try:
+                    import os
+                    require_confirm_mid = os.getenv("REQUIRE_HUMAN_CONFIRM", "true").lower() == "true"
+                    if require_confirm_mid:
+                        if supabase:
+                            j = supabase.table("jobs").select("status").eq("run_id", run_id).single().execute()
+                            status = (j.data or {}).get("status") if j and j.data else None
+                            if status != "planning_confirmed":
+                                async for chunk in emit("System", "info", run_id, thread_id, delta="📝 请确认分镜方案以继续执行"):
+                                    yield chunk
+                                async for chunk in emit("System", "run_finished", run_id, thread_id, delta="⏳ 等待人工确认…", payload={"code": "confirmation_required", "run_id": run_id}):
+                                    yield chunk
+                                return
+                        else:
+                            try:
+                                conf = getattr(confirm_storyboard, "_confirmations", {})
+                            except Exception:
+                                conf = {}
+                            s = conf.get(f"{run_id}_storyboard", {}).get("status")
+                            if s != "confirmed":
+                                async for chunk in emit("System", "info", run_id, thread_id, delta="📝 请确认分镜方案以继续执行"):
+                                    yield chunk
+                                async for chunk in emit("System", "run_finished", run_id, thread_id, delta="⏳ 等待人工确认…", payload={"code": "confirmation_required", "run_id": run_id}):
+                                    yield chunk
+                                return
+                except Exception:
+                    pass
                 
                 # 4. 视觉设计（可选）
                 if image_control:

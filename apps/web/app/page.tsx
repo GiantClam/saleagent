@@ -47,7 +47,7 @@ function HomeContent() {
     }}>
       {/* 左侧：任务/会话工具栏 */}
       <AgentSidebar 
-        apiUrl={process.env.NEXT_PUBLIC_AGENT_URL} 
+        apiUrl={process.env.NEXT_PUBLIC_AGENT_URL || "https://api.aimarketingsite.com"} 
         onNew={async () => {
           setLastEvent(null); 
           setAllEvents([]);

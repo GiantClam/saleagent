@@ -17,7 +17,7 @@ type WorkflowStep = "collect" | "planning" | "keyframes" | "confirm" | "generati
 
 export function WorkflowContent() {
   const router = useRouter();
-  const apiUrl = process.env.NEXT_PUBLIC_AGENT_URL;
+  const apiUrl = process.env.NEXT_PUBLIC_AGENT_URL || "https://api.aimarketingsite.com";
   
   // 步骤1：收集用户输入
   const [step, setStep] = useState<WorkflowStep>("collect");
