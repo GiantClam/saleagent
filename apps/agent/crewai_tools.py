@@ -4,15 +4,15 @@ CrewAI Tools - 封装视频生成工作流的工具函数
 import os
 from typing import Optional, List, Dict, Any, Callable
 from crewai.tools import tool
-from openrouter_client import OpenRouterClient, OpenRouterError
+from .openrouter_client import OpenRouterClient, OpenRouterError
 import httpx
-from providers import get_image_provider, get_video_provider
-from r2 import upload_url_to_r2
-from runninghub_client import RunningHubClient
+from .providers import get_image_provider, get_video_provider
+from .r2 import upload_url_to_r2
+from .runninghub_client import RunningHubClient
 
 # 尝试导入 Supabase 队列（可选）
 try:
-    from video_task_queue_supabase import get_supabase_queue
+    from .video_task_queue_supabase import get_supabase_queue
     _supabase_queue_available = True
 except ImportError:
     _supabase_queue_available = False
@@ -511,23 +511,25 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         "2. 考虑场景之间的视觉连贯性，使用相似的色调、构图或元素进行衔接\n"
         "3. 在场景描述中考虑转场方式（淡入淡出、交叉溶解、硬切等），确保视觉流畅\n"
         "4. 相邻场景之间应该有逻辑关联，避免突兀的跳跃\n\n"
-        "【关键】文案完整性要求：\n"
+        "【关键】文案与语音参数要求：\n"
         "1. 每个场景必须包含完整的介绍文案（narration），文案应该覆盖整个场景的10秒时长\n"
         "2. 文案应该自然、流畅，与画面内容完美匹配，时长约30-40字（10秒旁白）\n"
         "3. 确保文案的完整性，不要截断或省略关键信息\n"
         "4. 文案应该与场景内的镜头内容同步，描述画面中正在发生的事情\n"
         "5. 文案应该具有连贯性，相邻场景的文案应该自然衔接\n\n"
+        "【新增】每个场景必须包含语音参数 voice_params：emotion（happy/sad/angry/calm 等）、speed（0.5-2.0）、vol（0.5-2.0）、pitch（-12 至 12），用于旁白合成。\n\n"
         "【关键】输出格式要求（必须严格遵守，这是最重要的）：\n"
         "1. 严格只输出 JSON 对象，不要任何额外文字、说明、Markdown 代码块、注释或思考过程\n"
         "2. 不要输出任何 reasoning 或思考过程，直接输出 JSON\n"
-        "3. JSON 结构必须为：{\"scenes\": [{\"scene_idx\": 1, \"narration\": \"完整的旁白文案（30-40字）\", \"clips\": [{\"idx\": 1, \"desc\": \"…\", \"begin_s\": 0.0, \"end_s\": 3.0}, ...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
+        "3. JSON 结构必须为：{\"scenes\": [{\"scene_idx\": 1, \"narration\": \"完整的旁白文案（30-40字）\", \"voice_params\": {\"emotion\": \"calm\", \"speed\": 1.0, \"vol\": 1.0, \"pitch\": 0}, \"clips\": [{\"idx\": 1, \"desc\": \"…\", \"begin_s\": 0.0, \"end_s\": 3.0}, ...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
         "4. 每个 scene 必须包含 scene_idx, narration, clips, begin_s, end_s 字段\n"
         "5. narration 字段：完整的旁白文案（30-40字），覆盖整个场景的10秒时长，与画面内容匹配\n"
-        "6. 每个 clip 必须包含 idx, desc, begin_s, end_s 字段，且 end_s - begin_s <= 10.0\n"
-        "7. scene 的 begin_s 和 end_s 必须恰好相差 10.0 秒\n"
-        "8. scene 内的 clips 时间必须连续，且覆盖整个 scene 的时长\n"
-        "9. desc 为一句中文分镜描述（20-50字），不含编号/时间/标题/Markdown 符号\n"
-        "10. 不要输出 keyframes，这些由后续工具生成\n"
+        "6. voice_params 字段：包含 emotion/speed/vol/pitch，用于旁白合成；默认 emotion=calm, speed=1.0, vol=1.0, pitch=0\n"
+        "7. 每个 clip 必须包含 idx, desc, begin_s, end_s 字段，且 end_s - begin_s <= 10.0\n"
+        "8. scene 的 begin_s 和 end_s 必须恰好相差 10.0 秒\n"
+        "9. scene 内的 clips 时间必须连续，且覆盖整个 scene 的时长\n"
+        "10. desc 为一句中文分镜描述（20-50字），不含编号/时间/标题/Markdown 符号\n"
+        "11. 不要输出 keyframes，这些由后续工具生成\n"
         "11. 【最重要】直接输出 JSON，不要任何前缀、后缀或说明文字\n\n"
         "【正确示例】（必须完全按照此格式）：\n"
         "{\n"
@@ -568,8 +570,8 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         f"4. 每个场景的结尾画面应该考虑与下一个场景的衔接，确保视觉流畅\n"
         f"5. 使用相似的色调、构图或元素来连接相邻场景，避免突兀的跳跃\n\n"
         f"请严格按上述 JSON 结构返回，scenes 数组必须包含恰好 {num_scenes} 个场景。\n"
-        f"每个场景必须包含 narration 字段（完整的旁白文案）和多个镜头（clips）。\n"
-        f"【重要】必须返回有效的 JSON 格式，使用 \"scenes\" 作为顶层数组，每个 scene 包含 \"scene_idx\", \"narration\", \"clips\", \"begin_s\", \"end_s\"。\n"
+        f"每个场景必须包含 narration 字段（完整的旁白文案）、voice_params 以及多个镜头（clips）。\n"
+        f"【重要】必须返回有效的 JSON 格式，使用 \"scenes\" 作为顶层数组，每个 scene 包含 \"scene_idx\", \"narration\", \"voice_params\", \"clips\", \"begin_s\", \"end_s\"。\n"
         f"【关键】场景数量必须严格等于 {num_scenes}，每个场景的时长必须恰好为10秒。"
     )
     
@@ -637,6 +639,18 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
                                         "type": "string",
                                         "description": "完整的旁白文案，约30-40字，覆盖整个场景的10秒时长，与画面内容匹配"
                                     },
+                                    "voice_params": {
+                                        "type": "object",
+                                        "properties": {
+                                            "emotion": {"type": "string"},
+                                            "speed": {"type": "number"},
+                                            "vol": {"type": "number"},
+                                            "pitch": {"type": "integer"}
+                                        },
+                                        "required": ["emotion", "speed", "vol", "pitch"],
+                                        "additionalProperties": False,
+                                        "description": "旁白语音参数：emotion/speed/vol/pitch"
+                                    },
                                     "begin_s": {
                                         "type": "number",
                                         "description": "场景开始时间（秒）"
@@ -674,7 +688,7 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
                                         }
                                     }
                                 },
-                                "required": ["scene_idx", "narration", "begin_s", "end_s", "clips"],
+                                "required": ["scene_idx", "narration", "voice_params", "begin_s", "end_s", "clips"],
                                 "additionalProperties": False
                             }
                         }
@@ -1035,6 +1049,62 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
     
     return json.dumps({"scenes": validated_scenes}, ensure_ascii=False)
 
+
+async def refine_storyboard_from_scene_descriptions(scene_texts: List[str], styles: List[str], total_duration: float) -> str:
+    """依据每个 scene 的文字描述，生成符合规范的 scene 结构 storyboard（每个 scene 恰好 10s）。"""
+    if not (OPENROUTER_BASE and OPENROUTER_KEY):
+        raise RuntimeError("未配置 OpenRouter（OPENROUTER_API_BASE / OPENROUTER_API_KEY）")
+    or_client = OpenRouterClient(
+        api_base=OPENROUTER_BASE,
+        api_key=OPENROUTER_KEY,
+        referer=EMBED_REFERER,
+        title="SaleAgent"
+    )
+    num_scenes = max(1, len(scene_texts))
+    sys_prompt = (
+        "你是资深广告导演。基于用户已产出的每个场景的文字描述，生成规范的分镜脚本：\n"
+        "- 返回 JSON 对象，包含 \"scenes\" 数组，长度与输入场景数一致\n"
+        "- 每个 scene 恰好 10s，包含完整 narration（约30-40字，覆盖全时长）与多个 clips\n"
+        "- clips 列表中每个镜头包含 idx, desc, begin_s, end_s，镜头时间连续且总时长恰好 10s\n"
+        "- narration 要与 clips 描述内容一致、自然衔接\n"
+        "- 保持风格：" + ", ".join(styles or []) + "\n"
+        "- 输出严格 JSON：{\"scenes\": [{\"scene_idx\": 1, \"narration\": \"...\", \"clips\": [...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
+    )
+    user_prompt = {
+        "scene_texts": scene_texts,
+        "requirements": {
+            "num_scenes": num_scenes,
+            "per_scene_duration": 10.0,
+            "total_duration": float(total_duration or num_scenes * 10.0),
+        }
+    }
+    resp = await or_client.chat(
+        model=STORYBOARD_LLM_MODEL,
+        system=sys_prompt,
+        messages=[{"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)}],
+        temperature=0.3,
+    )
+    content = or_client.pick_content(resp) or "{}"
+    try:
+        obj = json.loads(content)
+        if isinstance(obj, dict) and obj.get("scenes"):
+            return json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        pass
+    # 回退：为每个文本生成基本结构
+    scenes = []
+    for i, t in enumerate(scene_texts, start=1):
+        scenes.append({
+            "scene_idx": i,
+            "narration": (str(t)[:40] or "旁白"),
+            "clips": [
+                {"idx": 1, "desc": str(t)[:80] or "镜头描述", "begin_s": 0.0, "end_s": 5.0},
+                {"idx": 2, "desc": "场景延续", "begin_s": 5.0, "end_s": 10.0},
+            ],
+            "begin_s": 0.0,
+            "end_s": 10.0,
+        })
+    return json.dumps({"scenes": scenes}, ensure_ascii=False)
 
 def review_storyboard_impl(storyboards_json: str, num_clips: int, goal: str, styles: List[str], total_duration: float = 10.0, max_retries: int = 3) -> str:
     """
@@ -1456,6 +1526,7 @@ def merge_storyboards_to_video_tasks_impl(storyboards_json: str, run_id: str, to
             "scene_idx": scene_idx,
             "desc": scene_desc,
             "narration": scene_narration,  # 保存完整的旁白文案
+            "voice_params": scene.get("voice_params", {}),
             "clips": clips,  # 保留所有 clips 信息
             "total_duration": 10.0,  # 每个 scene 恰好10s
             "begin_s": scene_begin,
@@ -2094,7 +2165,7 @@ def stitch_video_tool(clip_results_json: str, run_id: str) -> str:
             
             # 直接提交的任务，使用 RunningHub 轮询
             if queue_type == "direct":
-                from runninghub_client import RunningHubClient
+                from .runninghub_client import RunningHubClient
                 client = RunningHubClient()
                 
                 # 获取 RunningHub task_id
@@ -2436,4 +2507,342 @@ def stitch_video_tool(clip_results_json: str, run_id: str) -> str:
     cdn_url = _run_async_safe(stitch_video_segments(segments, run_id))
     
     return cdn_url
+
+
+@tool("旁白合成工具")
+def synthesize_voice_tool(scene_idx: int, narration: str, voice_id: str, emotion: str, speed: float, vol: float, pitch: int, run_id: str) -> str:
+    """
+    根据旁白文本与语音参数生成语音（MP3）与字幕（SRT），并上传到 R2。
+    返回包含音频与字幕 URL 的 JSON。
+    """
+    return _run_async_safe(synthesize_voice_impl(scene_idx, narration, voice_id, emotion, speed, vol, pitch, run_id))
+
+
+async def synthesize_voice_impl(scene_idx: int, narration: str, voice_id: str, emotion: str, speed: float, vol: float, pitch: int, run_id: str) -> str:
+    import os, httpx, json, logging, re
+    from .r2 import get_r2_client
+    api_key = os.getenv("MINIMAX_API_KEY")
+    if not api_key:
+        raise RuntimeError("未配置 Minimax API（MINIMAX_API_KEY）")
+    logger = logging.getLogger("crewai_tools.synthesize_voice")
+    audio_bytes: bytes = b""
+    subtitle_bytes: bytes = b""
+    meaningful = re.sub(r"\s+", "", str(narration or ""))
+    if len(meaningful) < 20:
+        raise RuntimeError("旁白文本长度不足20字")
+    logger.info(
+        f"[synthesize_voice_tool] Calling Minimax API for scene_idx={scene_idx}: "
+        f"voice_id={voice_id}, emotion={emotion}, speed={speed}, vol={vol}, pitch={pitch}, text={narration}..."
+    )
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            url = "https://api.minimaxi.com/v1/t2a_v2"
+            speech_model = os.getenv("MINIMAX_SPEECH_MODEL", "speech-2.6-turbo")
+            payload = {
+                "model": speech_model,
+                "text": narration,
+                "voice_setting": {
+                    "voice_id": voice_id,
+                    "speed": float(speed),
+                    "vol": float(vol),
+                    "pitch": int(pitch),
+                    "emotion": emotion,
+                },
+                "audio_setting": {
+                    "sample_rate": 32000,
+                    "bitrate": 128000,
+                    "format": "mp3",
+                    "channel": 2,
+                },
+                "stream": False,
+                # 如果服务支持 URL 输出，尝试设置（不影响兼容）
+                "output_format": "url",
+                # 使能字幕输出，由服务端生成字幕并返回 URL（若支持）
+                "subtitle_enable": True,
+            }
+            r = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            r.raise_for_status()
+            data = r.json()
+            try:
+                br = data.get("base_resp") or {}
+                sc = (br.get("status_code") or data.get("status_code"))
+                sm = (br.get("status_msg") or data.get("status_msg"))
+                if sc or sm:
+                    logger.info(f"[synthesize_voice_tool] base_resp: code={sc}, msg={sm}")
+            except Exception:
+                pass
+            audio_url = (data.get("audio_url") or (data.get("data") or {}).get("audio_url") or
+                         ((data.get("audio_file") or {}).get("url")))
+            audio_any = (data.get("audio") or (data.get("data") or {}).get("audio"))
+            subtitle_url = (
+                data.get("subtitle_url") or
+                (data.get("data") or {}).get("subtitle_url") or
+                ((data.get("subtitle_file") or {}).get("url")) or
+                (data.get("subtitle_file") if isinstance(data.get("subtitle_file"), str) else None) or
+                (((data.get("data") or {}).get("subtitle_file")) if isinstance((data.get("data") or {}).get("subtitle_file"), str) else None)
+            )
+            if audio_url:
+                ra = await client.get(audio_url)
+                ra.raise_for_status()
+                audio_bytes = ra.content
+            elif audio_any:
+                s = str(audio_any).strip()
+                if s.startswith("http://") or s.startswith("https://"):
+                    ra = await client.get(s)
+                    ra.raise_for_status()
+                    audio_bytes = ra.content
+                else:
+                    try:
+                        audio_bytes = bytes.fromhex(s)
+                    except Exception:
+                        import base64
+                        try:
+                            audio_bytes = base64.b64decode(s)
+                        except Exception:
+                            raise RuntimeError("同步 TTS 返回的 audio 非 URL/HEX/Base64")
+            else:
+                raise RuntimeError("同步 TTS 未返回音频内容")
+            
+            def json_to_srt(json_text: str) -> str:
+                try:
+                    arr = json.loads(json_text)
+                    if isinstance(arr, dict):
+                        arr = arr.get("subtitles") or arr.get("segments") or arr.get("list") or []
+                    lines = []
+                    idx = 1
+                    def fmt(t: float) -> str:
+                        h = int(t // 3600); m = int((t % 3600) // 60); s = int(t % 60); ms = int(round((t - int(t)) * 1000))
+                        return f"{h:02}:{m:02}:{s:02},{ms:03}"
+                    for item in arr if isinstance(arr, list) else []:
+                        if not isinstance(item, (dict,)):
+                            continue
+                        st = item.get("begin_time") or item.get("start") or item.get("begin") or item.get("from")
+                        et = item.get("end_time") or item.get("end") or item.get("to")
+                        txt = item.get("text") or item.get("content") or item.get("sentence") or item.get("word") or ""
+                        try:
+                            stf = float(st)
+                            etf = float(et)
+                        except Exception:
+                            continue
+                        if txt is None:
+                            txt = ""
+                        # 过滤仅由标点/空白组成的片段（避免生成看似“空白”的字幕条目）
+                        import re
+                        cleaned = re.sub(r"[\s:;，。；、！!？?－—~·…·，]+", "", str(txt))
+                        if not cleaned:
+                            continue
+                        lines.append(f"{idx}\n{fmt(stf)} --> {fmt(etf)}\n{str(txt)}\n")
+                        idx += 1
+                    if lines:
+                        return "\n".join(lines)
+                except Exception:
+                    pass
+                return ""
+            if subtitle_url:
+                rs = await client.get(subtitle_url)
+                if rs.status_code == 200 and rs.content:
+                    try:
+                        srt = json_to_srt(rs.text)
+                    except Exception:
+                        srt = ""
+                    if srt:
+                        subtitle_bytes = srt.encode("utf-8")
+                    else:
+                        subtitle_bytes = rs.content
+            
+    except Exception as e:
+        logger.error(f"[synthesize_voice] 同步合成失败: {e}", exc_info=True)
+        audio_bytes = b""
+    # 兜底：如果音频为空或过小，判定为失败，避免上传无效音频
+    if not audio_bytes or len(audio_bytes) < 10000:
+        raise RuntimeError("同步 TTS 返回的音频为空或过小")
+    def make_srt(text: str, total_s: float = 10.0, spd: float = 1.0) -> str:
+        import re
+        parts = [p.strip() for p in re.split(r"[，。；、：:,!?.]", text) if p.strip()]
+        if not parts:
+            parts = [text.strip()] if text.strip() else ["旁白"]
+        parts = parts[:4]
+        weights = [max(1.0, len(p) / max(0.5, spd)) for p in parts]
+        total_w = sum(weights)
+        durations = [total_s * (w / total_w) for w in weights]
+        min_seg = 1.2
+        need = sum(max(0.0, min_seg - d) for d in durations)
+        if need > 0 and total_s > 0:
+            extra_pool = sum(max(0.0, d - min_seg) for d in durations)
+            if extra_pool > 0:
+                factor = need / extra_pool
+                durations = [max(min_seg, d - max(0.0, d - min_seg) * factor) for d in durations]
+            else:
+                n = len(durations)
+                durations = [total_s / n for _ in durations]
+        sum_d = sum(durations)
+        if sum_d > 0:
+            durations = [d * (total_s / sum_d) for d in durations]
+        def fmt(t: float) -> str:
+            h = int(t // 3600); m = int((t % 3600) // 60); s = int(t % 60); ms = int(round((t - int(t)) * 1000))
+            return f"{h:02}:{m:02}:{s:02},{ms:03}"
+        lines = []
+        cur = 0.0
+        for i, (p, d) in enumerate(zip(parts, durations), start=1):
+            start = cur
+            end = min(total_s, cur + d)
+            lines.append(f"{i}\n{fmt(start)} --> {fmt(end)}\n{p}\n")
+            cur = end
+        return "\n".join(lines)
+    if not audio_bytes or len(audio_bytes) == 0:
+        raise RuntimeError("Minimax 未返回有效音频，直连/回退均失败")
+    if subtitle_bytes:
+        try:
+            raw = subtitle_bytes.decode("utf-8", errors="ignore")
+            if raw.strip().startswith("[") or raw.strip().startswith("{"):
+                srt_conv = json_to_srt(raw)
+                srt_text = srt_conv if srt_conv else make_srt(narration, 10.0, float(speed))
+            else:
+                srt_text = raw
+            # 如果转成的 SRT 仍然缺少有效文本，回退按旁白生成
+            import re
+            if not re.search(r"[\u4e00-\u9fa5A-Za-z0-9]", srt_text or ""):
+                srt_text = make_srt(narration, 10.0, float(speed))
+        except Exception:
+            srt_text = make_srt(narration, 10.0, float(speed))
+    else:
+        srt_text = make_srt(narration, 10.0, float(speed))
+    r2 = get_r2_client()
+    if not r2:
+        raise RuntimeError("R2 未配置")
+    bucket = os.getenv("R2_BUCKET", "video")
+    audio_key = f"{run_id}_scene_{scene_idx}_vo.mp3"
+    subs_key = f"{run_id}_scene_{scene_idx}.srt"
+    # 统一 SRT 行尾为 CRLF，并加 UTF-8 BOM，避免浏览器/播放器误判编码
+    srt_norm = "\r\n".join(srt_text.replace("\r\n", "\n").splitlines())
+    srt_bytes = b"\xEF\xBB\xBF" + srt_norm.encode("utf-8")
+    r2.put_object(Bucket=bucket, Key=audio_key, Body=audio_bytes, ContentType="audio/mpeg", CacheControl="no-cache, no-store, must-revalidate")
+    r2.put_object(Bucket=bucket, Key=subs_key, Body=srt_bytes, ContentType="application/x-subrip; charset=utf-8", CacheControl="no-cache, no-store, must-revalidate")
+    public_base = os.getenv("R2_PUBLIC_BASE")
+    account_id = os.getenv("R2_ACCOUNT_ID")
+    def puburl(key: str) -> str:
+        if public_base:
+            return f"{public_base.rstrip('/')}/{key}"
+        if account_id:
+            return f"https://pub-{account_id}.r2.dev/{key}"
+        raise RuntimeError("R2_PUBLIC_BASE 或 R2_ACCOUNT_ID 未配置")
+    return json.dumps({"audio_url": puburl(audio_key), "subtitle_url": puburl(subs_key)}, ensure_ascii=False)
+
+
+@tool("背景音乐合成工具")
+def synthesize_bgm_tool(bgm_prompt: str, run_id: str) -> str:
+    """
+    根据提示生成背景音乐（MP3），并上传到 R2。返回包含 BGM URL 的 JSON。
+    """
+    return _run_async_safe(synthesize_bgm_impl(bgm_prompt, run_id))
+
+
+async def synthesize_bgm_impl(bgm_prompt: str, run_id: str) -> str:
+    import os, httpx, json, logging
+    from .r2 import get_r2_client
+    api_key = os.getenv("MINIMAX_API_KEY")
+    if not api_key:
+        raise RuntimeError("未配置 Minimax API（MINIMAX_API_KEY）")
+    logger = logging.getLogger("crewai_tools.synthesize_bgm")
+    audio_bytes: bytes = b""
+    try:
+        async with httpx.AsyncClient(timeout=600) as client:
+            url = "https://api.minimaxi.com/v1/music_generation"
+            lyrics_hint = (
+                "[Intro]\n纯器乐，无人声。氛围柔和，铺底延迟与暖垫。\n"
+                "[Verse]\n纯器乐，无人声。节奏克制，突出轻微律动与质感。\n"
+                "[Chorus]\n纯器乐，无人声。能量略微提升，柔和主旋律淡入。\n"
+                "[Bridge]\n纯器乐，无人声。纹理变化，加入细微琶音与过渡。\n"
+                "[Outro]\n纯器乐，无人声。逐步收束，元素淡出，尾部渐隐。\n"
+            )
+            payload = {
+                "model": "music-2.0",
+                "prompt": bgm_prompt,
+                # 初始直接请求 URL 输出；若服务端不支持，后续回退去掉此参数
+                "output_format": "url",
+                "stream": False,
+                "audio_setting": {"sample_rate": 32000, "bitrate": 128000, "format": "mp3"},
+                # 结构化“器乐-only”歌词，满足参数约束但不引入人声
+                "lyrics": lyrics_hint,
+            }
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+            if resp.status_code == 404:
+                url = "https://api.minimaxi.chat/v1/music_generation"
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+            if resp.status_code >= 400:
+                txt = resp.text[:300]
+                lyrics_hint = "[Intro]\nInstrumental background, no vocals.\n[Verse]\nInstrumental background, no vocals.\n[Chorus]\nInstrumental background, no vocals.\n[Outro]\nInstrumental background, no vocals."
+                payload_fallback = {"model": "music-2.0", "prompt": bgm_prompt, "stream": False, "lyrics": lyrics_hint}
+                resp = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json=payload_fallback,
+                )
+            resp.raise_for_status()
+            jd = resp.json()
+            data = jd.get("data") or {}
+            # 兼容返回：data.audio_url 或 data.audio（可能是 URL 或 HEX）
+            audio_url = jd.get("audio_url") or data.get("audio_url") or ((jd.get("audio_file") or {}).get("url"))
+            audio_any = jd.get("audio") or data.get("audio")
+            if audio_url:
+                r = await client.get(audio_url)
+                r.raise_for_status()
+                audio_bytes = r.content
+            elif audio_any:
+                s = str(audio_any).strip()
+                if s.startswith("http://") or s.startswith("https://"):
+                    r = await client.get(s)
+                    r.raise_for_status()
+                    audio_bytes = r.content
+                else:
+                    try:
+                        audio_bytes = bytes.fromhex(s)
+                    except Exception:
+                        import base64
+                        try:
+                            audio_bytes = base64.b64decode(s)
+                        except Exception:
+                            raise RuntimeError("音乐生成返回的 audio 非 URL/HEX/Base64")
+            else:
+                raise RuntimeError("Minimax 音乐生成未返回音频（audio_url/audio）")
+    except Exception as e:
+        import tempfile, subprocess
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        tmp.close()
+        cmd = [
+            "ffmpeg", "-f", "lavfi", "-t", "30", "-i", "sine=frequency=440:sample_rate=32000",
+            "-filter:a", "volume=0.2",
+            "-c:a", "libmp3lame", "-b:a", "128k", "-y", tmp.name
+        ]
+        subprocess.run(cmd, capture_output=True)
+        with open(tmp.name, "rb") as f:
+            audio_bytes = f.read()
+        logger.warning(f"[synthesize_bgm] music-2.0 合成失败，回退 bytes={len(audio_bytes)}: {e}")
+    r2 = get_r2_client()
+    if not r2:
+        raise RuntimeError("R2 未配置")
+    bucket = os.getenv("R2_BUCKET", "video")
+    bgm_key = f"{run_id}_bgm.mp3"
+    r2.put_object(Bucket=bucket, Key=bgm_key, Body=audio_bytes, ContentType="audio/mpeg", CacheControl="no-cache, no-store, must-revalidate")
+    public_base = os.getenv("R2_PUBLIC_BASE")
+    account_id = os.getenv("R2_ACCOUNT_ID")
+    if public_base:
+        bgm_url = f"{public_base.rstrip('/')}/{bgm_key}"
+    elif account_id:
+        bgm_url = f"https://pub-{account_id}.r2.dev/{bgm_key}"
+    else:
+        raise RuntimeError("R2_PUBLIC_BASE 或 R2_ACCOUNT_ID 未配置")
+    return json.dumps({"bgm_url": bgm_url}, ensure_ascii=False)
 

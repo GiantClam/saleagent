@@ -204,7 +204,7 @@ class CrewAISessionManager:
                     return False
             
             # 检查视频任务完成情况
-            from video_task_queue_supabase import get_supabase_queue
+            from .video_task_queue_supabase import get_supabase_queue
             queue = get_supabase_queue()
             
             if queue:
@@ -470,7 +470,7 @@ class CrewAISessionManager:
                         .execute()
                         # 继续执行拼接逻辑
             # 获取所有完成的视频片段
-            from video_task_queue_supabase import get_supabase_queue
+            from .video_task_queue_supabase import get_supabase_queue
             queue = get_supabase_queue()
             
             if queue:

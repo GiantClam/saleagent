@@ -1,6 +1,6 @@
 from typing import Dict, Any, List
 from crewai import Task, Crew, Process
-from crewai_agents import build_agents
+from .crewai_agents import build_agents
 
 
 def build_crew(payload: Dict[str, Any]) -> Crew:
@@ -30,8 +30,18 @@ def build_crew(payload: Dict[str, Any]) -> Crew:
     
     full_goal = " | ".join(goal_parts)
     
-    [creative_agent, director_agent, reviewer_agent, visual_agent, producer_agent] = build_agents()
-    # 注意：producer_agent 也负责视频拼接（stitch_video_tool），所以不需要单独的 editor_agent
+    agents = build_agents()
+    # 根据角色名称选择核心角色
+    def pick(role: str):
+        for a in agents:
+            if getattr(a, "role", "") == role:
+                return a
+        return None
+    creative_agent = pick("创意策划")
+    director_agent = pick("导演")
+    reviewer_agent = pick("制片人")
+    visual_agent = pick("美术")
+    producer_agent = pick("视频剪辑师")
     editor_agent = producer_agent  # 使用 producer_agent 作为剪辑师
     
     # 创意策划任务 - 包含所有收集的信息
@@ -177,7 +187,7 @@ def build_crew(payload: Dict[str, Any]) -> Crew:
     tasks = [t for t in [task_optimize, task_plan, task_review, task_generate_scene_images, task_merge, task_generate, task_stitch] if t]
 
     crew = Crew(
-        agents=[creative_agent, director_agent, reviewer_agent, visual_agent, producer_agent, editor_agent],
+        agents=[a for a in [creative_agent, director_agent, reviewer_agent, visual_agent, producer_agent, editor_agent] if a],
         tasks=tasks,
         process=Process.sequential,  # 使用 sequential 模式，确保任务按顺序执行
         # 不使用 hierarchical 或 planning，因为我们的任务流程是固定的，sequential 更稳定

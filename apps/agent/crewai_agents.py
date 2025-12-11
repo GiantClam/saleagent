@@ -1,6 +1,6 @@
 from typing import List
 from crewai import Agent
-from crewai_tools import optimize_prompt_tool, generate_sora2_prompt_tool, plan_storyboard_tool, review_storyboard_tool, generate_keyframe_tool, merge_storyboards_to_video_tasks_tool, generate_video_clip_tool, stitch_video_tool  # type: ignore
+from .crewai_tools import optimize_prompt_tool, generate_sora2_prompt_tool, plan_storyboard_tool, review_storyboard_tool, generate_keyframe_tool, merge_storyboards_to_video_tasks_tool, generate_video_clip_tool, stitch_video_tool, synthesize_voice_tool, synthesize_bgm_tool  # type: ignore
 
 
 def build_agents() -> List[Agent]:
@@ -104,6 +104,30 @@ def build_agents() -> List[Agent]:
     #     allow_delegation=False,
     # )
 
-    return [creative_agent, director_agent, reviewer_agent, visual_agent, producer_agent]
+    narration_agent = Agent(
+        role="旁白合成",
+        goal="根据全局旁白人声定义和各场景旁白文案生成高质量语音与字幕，并存储到 R2。",
+        backstory=(
+            "你负责将导演分镜中的旁白文案转换为语音轨道与字幕，保持全局音色一致，按场景情绪调整参数。"
+        ),
+        tools=[synthesize_voice_tool],  # type: ignore[arg-type]
+        verbose=True,
+        allow_delegation=False,
+        reasoning=False,
+    )
+
+    bgm_agent = Agent(
+        role="背景音乐合成",
+        goal="依据全局 BGM 提示生成匹配的背景音乐，并存储到 R2。",
+        backstory=(
+            "你根据创意策划阶段定义的 BGM 提示生成一条统一的背景音乐，用于最终拼接时混音。"
+        ),
+        tools=[synthesize_bgm_tool],  # type: ignore[arg-type]
+        verbose=True,
+        allow_delegation=False,
+        reasoning=False,
+    )
+
+    return [creative_agent, director_agent, reviewer_agent, visual_agent, producer_agent, narration_agent, bgm_agent]
 
 

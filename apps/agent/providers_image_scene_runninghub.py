@@ -7,7 +7,7 @@ import httpx
 # 文档参考：工作流完整接入示例
 # https://s.apifox.cn/b860476a-b4d0-4aa5-91b8-6dcaa18d6c7d/doc-7534195
 
-class QwenRunningHubImageProvider:
+class SceneRunningHubImageProvider:
     def __init__(self):
         """初始化时检查环境变量，如果未配置则抛出异常。"""
         api_key = os.getenv("RUNNINGHUB_API_KEY")
@@ -162,5 +162,56 @@ class QwenRunningHubImageProvider:
             if not image_url:
                 raise RuntimeError("未在超时时间内获得图片结果")
             return image_url
+
+    async def generate_scene(self, image_url: str, text: str, timeout_minutes: int = 8) -> dict:
+        """基于用户输入图片与场景文字，调用 RunningHub 工作流生成分镜头图片与描述。
+
+        返回 {"image_url": <图片URL>, "desc_text": <文字描述>}。
+        """
+        from .runninghub_client import RunningHubClient, RunningHubError
+        import httpx
+        client = RunningHubClient(api_key=os.getenv("RUNNINGHUB_API_KEY"))
+        # 直接使用当前 provider 的 workflow_id（来自 RUNNINGHUB_IMAGE_WORKFLOW_ID）
+        workflow_id = self.workflow_id
+        # 提交节点：image -> nodeId=21，text -> nodeId=3
+        node_info_list = [
+            {"nodeId": "21", "fieldName": "image", "fieldValue": image_url},
+            {"nodeId": "3", "fieldName": "text", "fieldValue": text},
+        ]
+        task_id = await client.create_task(workflow_id, node_info_list)
+        # 轮询状态，最长 timeout_minutes 分钟
+        max_iters = int((timeout_minutes * 60) / 5)
+        img_url = None
+        desc_text = None
+        for _ in range(max_iters):
+            st = await client.get_status(task_id)
+            if st == "SUCCESS":
+                outs = await client.get_outputs(task_id)
+                for it in outs:
+                    url = (
+                        it.get("fileUrl") or it.get("url") or it.get("ossUrl") or it.get("downloadUrl")
+                        or (it.get("value") if isinstance(it.get("value"), str) else None)
+                    )
+                    if not url:
+                        continue
+                    ul = str(url).lower()
+                    if any(ul.endswith(ext) for ext in [".png", ".jpg", ".jpeg"]):
+                        img_url = url
+                    elif any(ul.endswith(ext) for ext in [".json", ".txt"]):
+                        try:
+                            async with httpx.AsyncClient(timeout=60) as hc:
+                                rr = await hc.get(url)
+                                if rr.status_code == 200 and rr.content:
+                                    try:
+                                        desc_text = rr.content.decode("utf-8", errors="ignore")
+                                    except Exception:
+                                        desc_text = rr.text
+                        except Exception:
+                            pass
+                break
+            if st in {"FAILED", "ERROR"}:
+                raise RunningHubError("场景任务失败，请检查工作流与入参")
+            await asyncio.sleep(5)
+        return {"image_url": img_url, "desc_text": desc_text}
 
 

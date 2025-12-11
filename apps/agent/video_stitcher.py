@@ -11,11 +11,10 @@
 import os
 import asyncio
 import tempfile
-import subprocess
 import httpx
 import logging
 from typing import List, Optional
-from r2 import get_r2_client
+from .r2 import get_r2_client
 import boto3
 from boto3.s3.transfer import TransferConfig
 
@@ -59,8 +58,10 @@ async def stitch_video_segments(
                 f.write(resp.content)
             logger.debug(f"[video_stitcher] Downloaded segment: {url} -> {path}")
     
-    # 创建临时目录
-    with tempfile.TemporaryDirectory() as tmpdir:
+    # 创建临时目录（Windows下MoviePy/ffmpeg句柄释放存在时，使用自管理目录更稳妥）
+    import shutil
+    tmpdir = tempfile.mkdtemp(prefix=f"stitch_{run_id}_")
+    try:
         # 下载所有片段
         async def download_all():
             tasks = [
@@ -72,89 +73,262 @@ async def stitch_video_segments(
         
         segment_paths = await download_all()
         logger.info(f"[video_stitcher] Downloaded {len(segment_paths)} segments")
+
+        # 为每个片段合成旁白并烧录字幕（如果存在），并确保每段都有统一的音频编码
+        def r2_public_url(key: str) -> Optional[str]:
+            base = os.getenv("R2_PUBLIC_BASE")
+            if base:
+                return f"{base.rstrip('/')}/{key}"
+            acc = os.getenv("R2_ACCOUNT_ID")
+            if acc:
+                return f"https://pub-{acc}.r2.dev/{key}"
+            return None
+        processed_paths = []
+        async def process_segment(i: int, in_path: str) -> str:
+            scene_idx = i + 1
+            voice_key = f"{run_id}_scene_{scene_idx}_vo.mp3"
+            subs_key = f"{run_id}_scene_{scene_idx}.srt"
+            voice_url = r2_public_url(voice_key)
+            subs_url = r2_public_url(subs_key)
+            voice_path = os.path.join(tmpdir, f"scene_{scene_idx}_vo.mp3")
+            subs_path = os.path.join(tmpdir, f"scene_{scene_idx}.srt")
+            has_voice = False
+            has_subs = False
+            # 下载语音与字幕（如果存在）
+            async with httpx.AsyncClient(timeout=60) as client:
+                try:
+                    if voice_url:
+                        r = await client.get(voice_url)
+                        if r.status_code == 200 and r.content:
+                            with open(voice_path, "wb") as f:
+                                f.write(r.content)
+                            has_voice = True
+                            logger.info(f"[video_stitcher] Found narration for scene {scene_idx}")
+                    if subs_url:
+                        r = await client.get(subs_url)
+                        if r.status_code == 200 and r.content:
+                            with open(subs_path, "wb") as f:
+                                f.write(r.content)
+                            has_subs = True
+                            logger.info(f"[video_stitcher] Found subtitles for scene {scene_idx}")
+                except Exception as e:
+                    logger.debug(f"[video_stitcher] Failed to fetch voice/subs for scene {scene_idx}: {e}")
+            out_path = os.path.join(tmpdir, f"clip_{i}_processed.mp4")
+            # 优先尝试使用 MoviePy 进行语音合成与字幕烧录，避免 FFmpeg 路径兼容问题
+            try:
+                from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip, concatenate_videoclips
+                clip = VideoFileClip(in_path)
+                try:
+                    _ = float(getattr(clip, "duration", 10.0) or 10.0)
+                except Exception:
+                    pass
+                try:
+                    d = float(getattr(clip, "duration", 0.0) or 0.0)
+                    if d and d > 0.06:
+                        safe_end = max(0.0, d - 0.05)
+                        clip = clip.subclip(0, safe_end)
+                except Exception:
+                    pass
+                # 设置音频：优先旁白，缺失则保留原音频
+                voice = None
+                if has_voice:
+                    voice = AudioFileClip(voice_path)
+                    try:
+                        clip = clip.set_audio(voice)
+                    except AttributeError:
+                        try:
+                            clip.audio = voice
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        if os.getenv("FORCE_MUTE_MODEL_AUDIO", "").lower() in {"1", "true", "yes"}:
+                            clip = clip.set_audio(None)
+                    except Exception:
+                        pass
+                # 烧录字幕（如果存在）
+                moviepy_subs_ok = False
+                if has_subs:
+                    try:
+                        from moviepy.video.tools.subtitles import SubtitlesClip
+                        font_env = os.getenv("SUBTITLE_FONT")
+                        fontsize = int(os.getenv("SUBTITLE_FONTSIZE", "42"))
+                        stroke_color = os.getenv("SUBTITLE_STROKE_COLOR", "black")
+                        stroke_width = int(os.getenv("SUBTITLE_STROKE_WIDTH", "2"))
+                        font_candidates = ([font_env] if font_env else [
+                            "Microsoft YaHei",
+                            "SimHei",
+                            "Noto Sans CJK SC",
+                            "Source Han Sans SC",
+                            "Arial Unicode MS",
+                            "Arial",
+                        ])
+                        sel_font = None
+                        for f in font_candidates:
+                            try:
+                                test = TextClip(
+                                    "测试",
+                                    font=f,
+                                    fontsize=fontsize,
+                                    color="white",
+                                    method="caption",
+                                    size=clip.size,
+                                )
+                                try:
+                                    test.close()
+                                except Exception:
+                                    pass
+                                sel_font = f
+                                break
+                            except Exception:
+                                continue
+                        font = sel_font or (font_env or "Arial")
+                        def make_textclip(txt):
+                            return TextClip(
+                                txt,
+                                font=font,
+                                fontsize=fontsize,
+                                color="white",
+                                stroke_color=stroke_color,
+                                stroke_width=stroke_width,
+                                method="caption",
+                                size=clip.size,
+                            )
+                        subs = SubtitlesClip(subs_path, make_textclip)
+                        clip = CompositeVideoClip([clip, subs.set_position(("center", "bottom"))])
+                        moviepy_subs_ok = True
+                    except Exception as e:
+                        logger.warning(f"[video_stitcher] MoviePy subtitles failed for scene {scene_idx}: {e}")
+                clip.write_videofile(
+                    out_path,
+                    codec="libx264",
+                    audio_codec="aac",
+                    fps=clip.fps or 30,
+                    ffmpeg_params=["-vsync", "cfr", "-movflags", "+faststart"],
+                    logger=None,
+                )
+                try:
+                    if has_subs and not moviepy_subs_ok:
+                        import subprocess
+                        font_env = os.getenv("SUBTITLE_FONT") or "Arial Unicode MS"
+                        fontsize = int(os.getenv("SUBTITLE_FONTSIZE", "42"))
+                        stroke_width = int(os.getenv("SUBTITLE_STROKE_WIDTH", "2"))
+                        sub_path_ff = subs_path.replace("\\", "\\\\")
+                        out2_path = os.path.join(tmpdir, f"clip_{i}_subs.mp4")
+                        vf = f"subtitles='{sub_path_ff}':force_style='FontName={font_env},FontSize={fontsize},Outline={stroke_width}'"
+                        cmd = [
+                            "ffmpeg", "-y",
+                            "-i", out_path,
+                            "-vf", vf,
+                            "-c:v", "libx264",
+                            "-c:a", "aac",
+                            out2_path,
+                        ]
+                        try:
+                            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            try:
+                                import shutil
+                                shutil.move(out2_path, out_path)
+                            except Exception:
+                                out_path = out2_path
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+                try:
+                    if voice:
+                        voice.close()
+                except Exception:
+                    pass
+                try:
+                    if 'subs' in locals() and subs:
+                        subs.close()
+                except Exception:
+                    pass
+                return out_path
+            except Exception as e:
+                raise RuntimeError(f"处理场景 {scene_idx} 失败: {e}")
+        for i, p in enumerate(segment_paths):
+            processed_paths.append(await process_segment(i, p))
+        logger.info(f"[video_stitcher] Processed segments with narration/subtitles: {len(processed_paths)}")
         
-        # 创建 concat 文件
-        concat_file = os.path.join(tmpdir, "concat.txt")
-        with open(concat_file, "w") as f:
-            for path in segment_paths:
-                f.write(f"file '{path}'\n")
-        
-        # 使用 ffmpeg 拼接，添加转场效果（淡入淡出、交叉溶解）
         output_path = os.path.join(tmpdir, "final.mp4")
         
-        # 如果只有一个片段，直接复制
-        if len(segment_paths) == 1:
-            cmd = [
-                "ffmpeg", "-i", segment_paths[0],
-                "-c", "copy", "-movflags", "+faststart", "-y", output_path
-            ]
-            logger.info(f"[video_stitcher] Single segment, using simple copy")
-        else:
-            # 多个片段：使用 filter_complex 添加转场效果
-            # 转场效果：每个片段之间添加 0.3 秒的交叉溶解（crossfade）
-            # 第一个片段：淡入 0.3 秒
-            # 中间片段：前一个片段的最后 0.3 秒与当前片段的前 0.3 秒交叉溶解
-            # 最后一个片段：淡出 0.3 秒
-            
-            fade_duration = 0.3  # 转场时长（秒）
-            
-            # 构建输入参数
-            input_args = []
-            for path in segment_paths:
-                input_args.extend(["-i", path])
-            
-            # 构建 filter_complex（使用更简单的方法）
-            # 为每个片段添加淡入淡出效果
-            filter_parts = []
-            for i in range(len(segment_paths)):
-                # 每个片段：开头淡入，结尾淡出
-                if i == 0:
-                    # 第一个片段：开头淡入
-                    filter_parts.append(f"[{i}:v]fade=t=in:st=0:d={fade_duration}[v{i}];")
-                elif i == len(segment_paths) - 1:
-                    # 最后一个片段：结尾淡出
-                    filter_parts.append(f"[{i}:v]fade=t=out:st=10-{fade_duration}:d={fade_duration}[v{i}];")
-                else:
-                    # 中间片段：开头淡入，结尾淡出
-                    filter_parts.append(f"[{i}:v]fade=t=in:st=0:d={fade_duration},fade=t=out:st=10-{fade_duration}:d={fade_duration}[v{i}];")
-            
-            # 连接所有片段
-            concat_inputs = "".join([f"[v{i}]" for i in range(len(segment_paths))])
-            filter_parts.append(f"{concat_inputs}concat=n={len(segment_paths)}:v=1:a=0[vout]")
-            
-            filter_complex = "".join(filter_parts)
-            
-            # 构建 FFmpeg 命令
-            cmd = [
-                "ffmpeg"
-            ] + input_args + [
-                "-filter_complex", filter_complex,
-                "-map", "[vout]",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-crf", "23",
-                "-movflags", "+faststart",
-                "-pix_fmt", "yuv420p",
-                "-y", output_path
-            ]
-            logger.info(f"[video_stitcher] Multiple segments ({len(segment_paths)}), using transitions with fade duration={fade_duration}s")
+        used_moviepy_concat = False
+        try:
+            from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips
+            clips = [VideoFileClip(p) for p in processed_paths]
+            # 额外安全裁剪每个片段的尾部，避免读取最后一帧时报 0 字节的告警
+            safe_trim = float(os.getenv("SAFE_TRIM_SECS", "0.05") or 0.05)
+            trimmed = []
+            for c in clips:
+                try:
+                    d = float(getattr(c, "duration", 0.0) or 0.0)
+                    if d and d > (safe_trim + 0.01):
+                        trimmed.append(c.subclip(0, max(0.0, d - safe_trim)))
+                    else:
+                        trimmed.append(c)
+                except Exception:
+                    trimmed.append(c)
+            clips = trimmed
+            final = concatenate_videoclips(clips, method="compose")
+            # 如果存在全局 BGM，则进行混音
+            bgm_key = f"{run_id}_bgm.mp3"
+            bgm_url = r2_public_url(bgm_key)
+            if bgm_url:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    rr = await client.get(bgm_url)
+                    if rr.status_code == 200 and rr.content:
+                        bgm_path = os.path.join(tmpdir, "bgm.mp3")
+                        with open(bgm_path, "wb") as f:
+                            f.write(rr.content)
+                        bgm_audio = AudioFileClip(bgm_path)
+                        if final.audio:
+                            from moviepy.audio.AudioClip import CompositeAudioClip
+                            try:
+                                from moviepy.audio.fx.all import volumex as audio_volumex
+                                a0 = audio_volumex(final.audio, 1.0)
+                                a1 = audio_volumex(bgm_audio, 0.25)
+                                mixed = CompositeAudioClip([a0, a1])
+                            except Exception:
+                                mixed = CompositeAudioClip([final.audio, bgm_audio])
+                        else:
+                            try:
+                                from moviepy.audio.fx.all import volumex as audio_volumex
+                                mixed = audio_volumex(bgm_audio, 0.25)
+                            except Exception:
+                                mixed = bgm_audio
+                        try:
+                            final = final.set_audio(mixed)
+                        except AttributeError:
+                            try:
+                                final.audio = mixed
+                            except Exception:
+                                pass
+            final.write_videofile(
+                output_path,
+                codec="libx264",
+                audio_codec="aac",
+                fps=final.fps or 30,
+                ffmpeg_params=["-vsync", "cfr", "-movflags", "+faststart"],
+                logger=None,
+            )
+            try:
+                for c in clips:
+                    c.close()
+                final.close()
+            except Exception:
+                pass
+            used_moviepy_concat = True
+        except Exception as e:
+            raise RuntimeError(f"MoviePy 拼接失败: {e}")
         
-        logger.info(f"[video_stitcher] Running FFmpeg command: {' '.join(cmd[:10])}... (truncated)")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            # 如果转场效果失败，降级到简单拼接
-            logger.warning(f"[video_stitcher] FFmpeg with transitions failed: {result.stderr[:500]}, falling back to simple concat")
-            cmd_simple = [
-                "ffmpeg", "-f", "concat", "-safe", "0", "-i", concat_file,
-                "-c", "copy", "-movflags", "+faststart", "-y", output_path
-            ]
-            result = subprocess.run(cmd_simple, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"FFmpeg 拼接失败: {result.stderr}")
-        
-        # 验证输出文件是否存在
         if not os.path.exists(output_path):
-            raise RuntimeError(f"FFmpeg 拼接完成但输出文件不存在: {output_path}")
+            raise RuntimeError(f"输出文件不存在: {output_path}")
         
         # 获取文件大小
         file_size = os.path.getsize(output_path)
@@ -163,10 +337,19 @@ async def stitch_video_segments(
             f"({file_size / 1024 / 1024:.2f} MB)"
         )
         
+        
+
         # 上传到 R2（使用分块上传支持大文件）
         r2 = get_r2_client()
         if not r2:
-            raise RuntimeError("R2 未配置")
+            # 回退：复制到工作目录并返回 file:// URL
+            fallback_out = os.path.join(os.getcwd(), f"{output_key or f'{run_id}_final.mp4'}")
+            try:
+                import shutil
+                shutil.copyfile(output_path, fallback_out)
+            except Exception:
+                fallback_out = output_path
+            return f"file://{fallback_out}"
         
         bucket = os.getenv("R2_BUCKET", "video")
         key = output_key or f"{run_id}_final.mp4"
@@ -206,6 +389,7 @@ async def stitch_video_segments(
                         key,
                         ExtraArgs={
                             "ContentType": "video/mp4",
+                            "CacheControl": "no-cache, no-store, must-revalidate",
                             "Metadata": {
                                 "run_id": run_id,
                                 "file_size": str(file_size)
@@ -226,6 +410,7 @@ async def stitch_video_segments(
                             Key=key,
                             Body=f.read(),
                             ContentType="video/mp4",
+                            CacheControl="no-cache, no-store, must-revalidate",
                             Metadata={
                                 "run_id": run_id,
                                 "file_size": str(file_size)
@@ -278,6 +463,11 @@ async def stitch_video_segments(
         )
         
         return final_video_url
+    finally:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def stitch_video_segments_sync(

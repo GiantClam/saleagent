@@ -304,10 +304,13 @@ class SupabaseVideoTaskQueue:
             # 使用相对导入，避免循环依赖
             import sys
             import importlib
-            if 'providers' not in sys.modules:
-                from providers import get_video_provider
+            if 'apps.agent.providers' not in sys.modules and 'providers' not in sys.modules:
+                from .providers import get_video_provider
             else:
-                providers_module = importlib.import_module('providers')
+                try:
+                    providers_module = importlib.import_module('apps.agent.providers')
+                except Exception:
+                    providers_module = importlib.import_module('providers')
                 get_video_provider = providers_module.get_video_provider
             
             video_provider = get_video_provider()
@@ -429,7 +432,7 @@ class SupabaseVideoTaskQueue:
     async def _poll_runninghub_task(self, task_id: str, provider_task_id: str, run_id: str, clip_idx: int):
         """轮询 RunningHub 任务状态，如果完成则更新数据库"""
         try:
-            from runninghub_client import RunningHubClient
+            from .runninghub_client import RunningHubClient
             client = RunningHubClient()
             
             # 检查任务状态
@@ -602,7 +605,7 @@ class SupabaseVideoTaskQueue:
             if task.get("status") == "submitted":
                 provider_task_id = task.get("provider_task_id")
                 if provider_task_id:
-                    from runninghub_client import RunningHubClient
+                    from .runninghub_client import RunningHubClient
                     client = RunningHubClient()
                     
                     status = await client.get_status(provider_task_id)

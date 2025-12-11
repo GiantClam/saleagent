@@ -6,25 +6,28 @@ from datetime import datetime
 import random
 import re
 from dotenv import load_dotenv
+import os
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
 
 # 首先加载 .env 文件，确保后续导入的模块能读取环境变量
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '.env'))
 
 from fastapi import FastAPI, Request, UploadFile, File
+from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from supabase import create_client
 import httpx
-from providers import get_image_provider, get_video_provider
-from r2 import upload_url_to_r2
-from openrouter_client import OpenRouterClient
+from .providers import get_image_provider, get_video_provider
+from .r2 import upload_url_to_r2
+from .openrouter_client import OpenRouterClient
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Any, Tuple
-from crewai_workflow import build_crew
-from crewai_tools import plan_storyboard_impl
+from .crewai_workflow import build_crew
+from .crewai_tools import plan_storyboard_impl
+from .crewai_tools import synthesize_voice_impl, synthesize_bgm_impl
 import logging
 logger = logging.getLogger("workflow")
 
@@ -32,6 +35,7 @@ logger = logging.getLogger("workflow")
 def encode_event(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+load_dotenv()
 app = FastAPI()
 
 # 应用启动时启动 Supabase 队列 worker
@@ -39,7 +43,7 @@ app = FastAPI()
 async def startup_event():
     """应用启动时初始化 Supabase 队列 worker"""
     try:
-        from video_task_queue_supabase import start_supabase_queue_worker
+        from .video_task_queue_supabase import start_supabase_queue_worker
         start_supabase_queue_worker()
     except Exception as e:
         logger.warning(f"[startup] Failed to start Supabase queue worker: {e}")
@@ -48,8 +52,7 @@ async def startup_event():
 async def shutdown_event():
     """应用关闭时停止 Supabase 队列 worker"""
     try:
-        from video_task_queue_supabase import get_supabase_queue
-        import asyncio
+        from .video_task_queue_supabase import get_supabase_queue
         
         queue = get_supabase_queue()
         if queue:
@@ -508,7 +511,7 @@ async def workflow_stitch(body: StitchRequest):
         return {"error": "no segments"}
     
     try:
-        from video_stitcher import stitch_video_segments
+        from .video_stitcher import stitch_video_segments
         
         final_key = body.output_key or f"{body.run_id}_final.mp4"
         cdn_url = await stitch_video_segments(
@@ -524,6 +527,84 @@ async def workflow_stitch(body: StitchRequest):
         }
     except Exception as e:
         logger.error(f"[workflow_stitch] Error: {e}", exc_info=True)
+        return {"error": str(e)}
+
+
+# 辅助工具端点：直接触发旁白与 BGM 合成，便于验证完整体验
+class SynthesizeVoiceRequest(BaseModel):
+    run_id: str
+    scene_idx: int
+    narration: str
+    voice_id: Optional[str] = None
+    emotion: str = "calm"
+    speed: float = 1.0
+    vol: float = 1.0
+    pitch: int = 0
+
+
+@app.post("/tools/synthesize-voice")
+async def tools_synthesize_voice(body: SynthesizeVoiceRequest):
+    vid = body.voice_id or os.getenv("MINIMAX_VOICE_ID", "zh_female_01")
+    try:
+        res = await synthesize_voice_impl(body.scene_idx, body.narration, vid, body.emotion, body.speed, body.vol, body.pitch, body.run_id)
+        try:
+            payload = json.loads(res)
+        except Exception:
+            payload = {"result": res}
+        return payload
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/tools/env-check")
+async def tools_env_check():
+    return {
+        "MINIMAX_MCP_BASE": bool(os.getenv("MINIMAX_MCP_BASE")),
+        "MINIMAX_API_KEY": bool(os.getenv("MINIMAX_API_KEY")),
+        "MINIMAX_VOICE_ID": os.getenv("MINIMAX_VOICE_ID") is not None,
+        "R2_BUCKET": os.getenv("R2_BUCKET") or "",
+        "R2_PUBLIC_BASE": bool(os.getenv("R2_PUBLIC_BASE")),
+        "R2_ACCOUNT_ID": bool(os.getenv("R2_ACCOUNT_ID")),
+    }
+
+
+class SynthesizeBgmRequest(BaseModel):
+    run_id: str
+    prompt: str
+
+
+@app.post("/tools/synthesize-bgm")
+async def tools_synthesize_bgm(body: SynthesizeBgmRequest):
+    try:
+        res = await synthesize_bgm_impl(body.prompt, body.run_id)
+        try:
+            payload = json.loads(res)
+        except Exception:
+            payload = {"result": res}
+        return payload
+    except Exception as e:
+        return {"error": str(e)}
+
+
+class UploadUrlRequest(BaseModel):
+    run_id: str
+    url: str
+    key: Optional[str] = None
+
+
+@app.post("/tools/upload-url")
+async def tools_upload_url(body: UploadUrlRequest):
+    try:
+        from .r2 import upload_url_to_r2
+        from urllib.parse import urlparse
+        k = body.key
+        if not k:
+            p = urlparse(body.url)
+            base = os.path.basename(p.path) or "clip.mp4"
+            k = f"{body.run_id}_{base}"
+        cdn = await upload_url_to_r2(body.url, k)
+        return {"cdn_url": cdn, "key": k}
+    except Exception as e:
         return {"error": str(e)}
 
 
@@ -780,7 +861,7 @@ async def get_crew_status(run_id: str):
 # 上传图片文件到 RunningHub（返回 fileName，可直接用于 nodeInfoList）
 @app.post("/workflow/upload-image")
 async def workflow_upload_image(file: UploadFile = File(...)):
-    from runninghub_client import RunningHubClient
+    from .runninghub_client import RunningHubClient
     content = await file.read()
     if not content:
         return {"error": "empty file"}
@@ -1542,7 +1623,10 @@ async def crewai_chat(request: Request):
     对话式视频生成信息收集端点
     使用创意策划 agent 通过多轮对话收集信息，支持 HITL
     """
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     action = body.get("action", "start")
     thread_id = body.get("thread_id") or f"t_{uuid.uuid4().hex[:8]}"
     run_id = body.get("run_id") or f"r_{uuid.uuid4().hex[:8]}"
@@ -1563,7 +1647,7 @@ async def crewai_chat(request: Request):
     async def generator():
         try:
             try:
-                from creative_agent import (
+                from .creative_agent import (
                     build_creative_agent_for_chat,
                     generate_question_with_options,
                     get_next_question,
@@ -1788,6 +1872,9 @@ async def crewai_chat(request: Request):
                     # 直接调用 plan_storyboard_impl 生成 storyboard
                     from crewai_tools import plan_storyboard_impl
                     goal = payload.get("goal", "")
+                    product_text = str(payload.get("product_text", "")).strip()
+                    if product_text:
+                        goal = (goal + "；" + product_text) if goal else product_text
                     styles = payload.get("styles", [])
                     total_duration = float(payload.get("total_duration", 10.0))
                     # 根据总时长计算分镜数量，确保每段不超过10秒
@@ -1810,6 +1897,44 @@ async def crewai_chat(request: Request):
                     
                     # 如果提取到了 storyboard 数据，发送给前端并等待确认
                     if storyboard_data and "scenes" in storyboard_data:
+                        # 可选：通过 RunningHub 工作流（id=1999021788958969857）基于用户图片+每个 scene 的文本生成分镜头图片与描述
+                        try:
+                            use_rh_scene = bool(payload.get("use_runninghub_scene_workflow"))
+                            input_image_url = payload.get("image_url") or payload.get("img")
+                            if use_rh_scene and input_image_url:
+                                from providers import get_image_provider
+                                from crewai_tools import refine_storyboard_from_scene_descriptions
+                                ip = get_image_provider()
+                                scenes = storyboard_data.get("scenes", [])
+                                scene_texts = []
+                                for scene in scenes:
+                                    sidx = int(scene.get("scene_idx", 1))
+                                    narration = str(scene.get("narration", "")).strip()
+                                    if narration:
+                                        text_for_scene = narration
+                                    else:
+                                        clips = scene.get("clips", [])
+                                        text_for_scene = "；".join([c.get("desc", "") for c in clips if c.get("desc")]) or f"场景{sidx}"
+                                    if hasattr(ip, "generate_scene"):
+                                        try:
+                                            res = await ip.generate_scene(input_image_url, text_for_scene)
+                                            if isinstance(res, dict):
+                                                if res.get("image_url"):
+                                                    scene["image_url"] = res["image_url"]
+                                                if res.get("desc_text"):
+                                                    scene_texts.append(res["desc_text"])
+                                        except Exception as e:
+                                            logger.warning(f"[crewai-chat] Image provider scene-gen failed: {e}")
+                                if scene_texts:
+                                    storyboard_json = await refine_storyboard_from_scene_descriptions(scene_texts, styles, total_duration)
+                                    try:
+                                        storyboard_data = json.loads(storyboard_json)
+                                    except Exception:
+                                        jm = re.search(r'\{.*?"scenes".*?\}', storyboard_json, re.DOTALL)
+                                        if jm:
+                                            storyboard_data = json.loads(jm.group(0))
+                        except Exception as e:
+                            logger.warning(f"[crewai-chat] RunningHub scene workflow integration failed (via provider): {e}")
                         # 生成 scene 图片
                         async for chunk in emit("视觉设计", "thought", run_id, thread_id,
                                                delta="🎨 正在为场景生成预览图片…"):
@@ -1936,6 +2061,44 @@ async def crewai_chat(request: Request):
                                     except Exception as e:
                                         logger.warning(f"[crewai-chat] Failed to regenerate image for scene {scene_idx}: {e}")
                                         scene["image_url"] = None
+                                # 可选：如果启用 RunningHub 场景工作流，则基于用户图片重新生成并用 LLM 整理
+                                try:
+                                    use_rh_scene = bool(payload.get("use_runninghub_scene_workflow"))
+                                    input_image_url = payload.get("image_url") or payload.get("img")
+                                    if use_rh_scene and input_image_url:
+                                        from providers import get_image_provider
+                                        from crewai_tools import refine_storyboard_from_scene_descriptions
+                                        ip = get_image_provider()
+                                        scenes = storyboard_data.get("scenes", [])
+                                        scene_texts = []
+                                        for scene in scenes:
+                                            sidx = int(scene.get("scene_idx", 1))
+                                            narration = str(scene.get("narration", "")).strip()
+                                            if narration:
+                                                text_for_scene = narration
+                                            else:
+                                                clips = scene.get("clips", [])
+                                                text_for_scene = "；".join([c.get("desc", "") for c in clips if c.get("desc")]) or f"场景{sidx}"
+                                            if hasattr(ip, "generate_scene"):
+                                                try:
+                                                    res = await ip.generate_scene(input_image_url, text_for_scene)
+                                                    if isinstance(res, dict):
+                                                        if res.get("image_url"):
+                                                            scene["image_url"] = res["image_url"]
+                                                        if res.get("desc_text"):
+                                                            scene_texts.append(res["desc_text"])
+                                                except Exception as e:
+                                                    logger.warning(f"[crewai-chat] Image provider scene-gen failed: {e}")
+                                        if scene_texts:
+                                            storyboard_json = await refine_storyboard_from_scene_descriptions(scene_texts, styles, total_duration)
+                                            try:
+                                                storyboard_data = json.loads(storyboard_json)
+                                            except Exception:
+                                                jm = re.search(r'\{.*?"scenes".*?\}', storyboard_json, re.DOTALL)
+                                                if jm:
+                                                    storyboard_data = json.loads(jm.group(0))
+                                except Exception as e:
+                                    logger.warning(f"[crewai-chat] RunningHub scene workflow re-gen failed (via provider): {e}")
                                 
                                 # 再次发送给用户确认
                                 async for chunk in emit("System", "storyboard_pending", run_id, thread_id,
@@ -1964,6 +2127,67 @@ async def crewai_chat(request: Request):
                         async for chunk in emit("System", "info", run_id, thread_id,
                                                delta="故事板已确认，继续执行后续流程…"):
                             yield chunk
+                        # 旁白与背景音乐合成（支持用户确认跳过）
+                        try:
+                            use_model_audio = bool(payload.get("use_model_audio") or payload.get("confirm_use_model_audio"))
+                            use_model_bgm = bool(payload.get("use_model_bgm") or payload.get("confirm_use_model_bgm"))
+                            from crewai_tools import synthesize_voice_impl, synthesize_bgm_impl
+                            import os
+                            voice_id = os.getenv("MINIMAX_VOICE_ID", "zh_female_01")
+                            scenes = storyboard_data.get("scenes", [])
+                            if not use_model_audio:
+                                for scene in scenes:
+                                    scene_idx = int(scene.get("scene_idx", 1))
+                                    narration = str(scene.get("narration", "")).strip()
+                                    vp = scene.get("voice_params", {}) or {}
+                                    emotion = vp.get("emotion", "calm")
+                                    speed = float(vp.get("speed", 1.0) or 1.0)
+                                    vol = float(vp.get("vol", 1.0) or 1.0)
+                                    pitch = int(vp.get("pitch", 0) or 0)
+                                    if narration:
+                                        try:
+                                            res = await synthesize_voice_impl(scene_idx, narration, voice_id, emotion, speed, vol, pitch, run_id)
+                                            payload_obj = None
+                                            try:
+                                                payload_obj = json.loads(res)
+                                            except Exception:
+                                                payload_obj = {"result": res}
+                                            async for chunk in emit("旁白合成", "narration_synthesized", run_id, thread_id,
+                                                                   delta=f"🎙️ 场景 {scene_idx} 旁白已合成",
+                                                                   payload=payload_obj):
+                                                yield chunk
+                                        except Exception as e:
+                                            logger.warning(f"[crewai-chat] Narration synthesis failed for scene {scene_idx}: {e}")
+                            else:
+                                async for chunk in emit("旁白合成", "narration_skipped", run_id, thread_id,
+                                                       delta="🎙️ 用户选择使用模型音频，跳过旁白合成"):
+                                    yield chunk
+                            # 合成背景音乐（一次）
+                            try:
+                                if not use_model_bgm:
+                                    bgm_prompt = payload.get("bgm_prompt") or (
+                                        f"{', '.join(styles) if styles else 'ambient modern electronic'} 风格，"
+                                        f"类型 {payload.get('video_type', 'general')}，"
+                                        f"情绪与画面匹配，克制、不抢戏、音量适中"
+                                    )
+                                    r = await synthesize_bgm_impl(bgm_prompt, run_id)
+                                    payload_obj = None
+                                    try:
+                                        payload_obj = json.loads(r)
+                                    except Exception:
+                                        payload_obj = {"result": r}
+                                    async for chunk in emit("背景音乐", "bgm_synthesized", run_id, thread_id,
+                                                           delta="🎵 背景音乐已生成",
+                                                           payload=payload_obj):
+                                        yield chunk
+                                else:
+                                    async for chunk in emit("背景音乐", "bgm_skipped", run_id, thread_id,
+                                                           delta="🎵 用户选择使用模型BGM，跳过背景音乐合成"):
+                                        yield chunk
+                            except Exception as e:
+                                logger.warning(f"[crewai-chat] BGM synthesis failed: {e}")
+                        except Exception as e:
+                            logger.debug(f"[crewai-chat] Voice/BGM synthesis step skipped due to error: {e}")
                         
                         # 执行剩余的工作流（从审核开始）
                         # 使用已确认的 storyboard 继续执行完整工作流

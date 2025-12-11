@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 import httpx
 
-from runninghub_client import RunningHubClient, RunningHubError
+from .runninghub_client import RunningHubClient, RunningHubError
 
 logger = logging.getLogger("crewai_tools")
 

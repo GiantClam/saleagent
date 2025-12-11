@@ -8,4 +8,5 @@ sse-starlette==1.8.2
 supabase==2.5.1
 crewai==1.4.0
 nest-asyncio==1.6.0
+moviepy==1.0.3
 
