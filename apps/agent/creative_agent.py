@@ -88,6 +88,8 @@ def collect_video_info_tool(
                 info["styles"] = []
             if user_response not in info["styles"]:
                 info["styles"].append(user_response)
+        elif question_type == "product_image":
+            info["image_url"] = user_response.strip()
         elif question_type == "theme":
             info["theme"] = user_response
         elif question_type == "keywords":
@@ -163,8 +165,8 @@ def generate_question_with_options(
     """
     根据问题类型生成问题和选项
     
-    Returns:
-        (问题文本, 选项列表)
+        Returns:
+            (问题文本, 选项列表)
     """
     if question_type == "video_type":
         return (
@@ -181,9 +183,14 @@ def generate_question_with_options(
             "请选择视频的风格（可以选择多个）：",
             STYLE_OPTIONS
         )
+    elif question_type == "product_image":
+        return (
+            "请上传产品图片（填写图片URL，或先上传文件获取URL）：",
+            []
+        )
     elif question_type == "theme":
         return (
-            "请描述视频的主题或核心内容：",
+            "请用一句话描述视频的主题或核心内容（尽量简洁）：",
             []
         )
     elif question_type == "keywords":
@@ -212,14 +219,16 @@ def get_next_question(current_info: Dict[str, Any]) -> Optional[str]:
     Returns:
         下一个问题的类型，如果所有信息已收集完成则返回 None
     """
+    if "image_url" not in current_info or not str(current_info.get("image_url", "")).strip():
+        return "product_image"
+    if "theme" not in current_info:
+        return "theme"
     if "video_type" not in current_info:
         return "video_type"
     if "duration" not in current_info:
         return "duration"
     if "styles" not in current_info or len(current_info.get("styles", [])) == 0:
         return "style"
-    if "theme" not in current_info:
-        return "theme"
     if "keywords" not in current_info or len(current_info.get("keywords", [])) == 0:
         return "keywords"
     if "key_elements" not in current_info or len(current_info.get("key_elements", [])) == 0:

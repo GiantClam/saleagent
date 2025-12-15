@@ -25,6 +25,10 @@ export function WorkflowContent() {
   const [totalDuration, setTotalDuration] = useState(10.0);
   const [styles, setStyles] = useState<string[]>([]);
   const [imageControl, setImageControl] = useState(false);
+  const [productImageUrl, setProductImageUrl] = useState("");
+  const [useVoiceAgent, setUseVoiceAgent] = useState(false);
+  const [useBgmAgent, setUseBgmAgent] = useState(false);
+  const [muteModelAudio, setMuteModelAudio] = useState(false);
   const [clipCount, setClipCount] = useState(4);
   
   // 步骤2：分镜方案
@@ -73,6 +77,31 @@ export function WorkflowContent() {
     }
   };
 
+  const handleRhScenes = async () => {
+    if (!apiUrl || !productImageUrl || storyboards.length === 0) return;
+    try {
+      const res = await fetch(`${apiUrl}/workflow/rh-scenes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image_url: productImageUrl,
+          styles,
+          total_duration: totalDuration,
+          storyboards,
+        }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const clips = data.clips || [];
+      if (clips.length > 0) {
+        setStoryboards(clips);
+        setStep("planning");
+      }
+    } catch (err) {
+      alert(`生成场景失败：${err}`);
+    }
+  };
+
   // 步骤2：生成关键帧（如果需要）
   const handleGenerateKeyframes = async () => {
     if (!apiUrl || storyboards.length === 0) return;
@@ -109,6 +138,9 @@ export function WorkflowContent() {
           total_duration: totalDuration,
           styles,
           image_control: imageControl,
+          use_voice_agent: useVoiceAgent,
+          use_bgm_agent: useBgmAgent,
+          mute_model_audio: muteModelAudio,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -162,6 +194,7 @@ export function WorkflowContent() {
             if (line.startsWith("data: ")) {
               try {
                 const data = JSON.parse(line.slice(6));
+                try { console.log("[SSE/run-clips]", data); } catch {}
                 if (data.type === "progress") {
                   // 更新单个镜头的进度
                   setClipResults((prev) => {
@@ -331,7 +364,37 @@ export function WorkflowContent() {
         <div style={{ background: "white", padding: 32, borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 24 }}>步骤 1：完善视频信息</h2>
           
-          <div style={{ marginBottom: 20 }}>
+        <div style={{ marginBottom: 20 }}>
+            <label style={{ display: "block", marginBottom: 8, fontSize: 14, fontWeight: 500 }}>产品图片URL *</label>
+            <input
+              type="url"
+              placeholder="https://..."
+              value={productImageUrl}
+              onChange={(e) => setProductImageUrl(e.target.value)}
+              style={{
+                width: "100%",
+                padding: 12,
+                border: "1px solid #d1d5db",
+                borderRadius: 8,
+                fontSize: 14,
+              }}
+            />
+          </div>
+
+          <div style={{ marginBottom: 12, display: "flex", gap: 16 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input type="checkbox" checked={useVoiceAgent} onChange={(e) => setUseVoiceAgent(e.target.checked)} />
+              <span style={{ fontSize: 14, fontWeight: 500 }}>启用旁白 agent</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input type="checkbox" checked={useBgmAgent} onChange={(e) => setUseBgmAgent(e.target.checked)} />
+              <span style={{ fontSize: 14, fontWeight: 500 }}>启用背景 BGM agent</span>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input type="checkbox" checked={muteModelAudio} onChange={(e) => setMuteModelAudio(e.target.checked)} />
+              <span style={{ fontSize: 14, fontWeight: 500 }}>禁止模型视频音轨</span>
+            </label>
+          </div>
             <label style={{ display: "block", marginBottom: 8, fontSize: 14, fontWeight: 500 }}>主体目标 *</label>
             <textarea
               value={subject}
@@ -506,6 +569,23 @@ export function WorkflowContent() {
                 }}
               >
                 {generatingKeyframes ? "生成中..." : "生成首尾帧"}
+              </button>
+            )}
+            {productImageUrl && (
+              <button
+                onClick={handleRhScenes}
+                style={{
+                  padding: "12px 24px",
+                  borderRadius: 8,
+                  background: "#10b981",
+                  color: "white",
+                  border: 0,
+                  fontSize: 14,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                基于图片生成场景并整理为storyboard
               </button>
             )}
             <button

@@ -37,7 +37,7 @@ def get_image_provider() -> ImageProvider:
         return MockImageProvider()
     try:
         if provider == "qwen_runninghub":
-            from .providers_image_qwen_runninghub import SceneRunningHubImageProvider
+            from .providers_image_scene_runninghub import SceneRunningHubImageProvider
             return SceneRunningHubImageProvider()
         elif provider == "seedream":
             from .providers_image_seedream import SeedreamImageProvider

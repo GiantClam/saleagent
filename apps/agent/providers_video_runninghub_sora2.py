@@ -19,22 +19,23 @@ class RunningHubSora2VideoProvider:
     async def _maybe_upload_image(self, image_url: Optional[str]) -> Optional[str]:
         if not image_url:
             return None
-        # 如果是 http(s) 外链，RunningHub 可直接使用；否则尝试下载再上传
-        if image_url.startswith("http://") or image_url.startswith("https://"):
+        # 若是 RunningHub 相对路径（如 api/xxxx.jpg），直接作为节点输入使用
+        if image_url.startswith("api/"):
             return image_url
-        # 尝试把本地路径下载为 bytes 并上传
-        # 在常见使用里前端会传公网 URL，这里作为兜底逻辑
+        # 对 http(s) 外链，尽量下载并上传为 RunningHub 内部 fileName，提高兼容性
         try:
-            async with httpx.AsyncClient(timeout=60) as c:
-                resp = await c.get(image_url)
-                if resp.status_code == 200:
-                    content = resp.content
-                    file_name = image_url.split("/")[-1] or "image.png"
-                    stored = await self.client.upload_bytes(content, file_name, file_type="input")
-                    return stored  # 返回 RunningHub 内部 fileName
+            if image_url.startswith("http://") or image_url.startswith("https://"):
+                async with httpx.AsyncClient(timeout=60) as c:
+                    resp = await c.get(image_url)
+                    if resp.status_code == 200 and resp.content:
+                        file_name = image_url.split("/")[-1] or "image.png"
+                        stored = await self.client.upload_bytes(resp.content, file_name, file_type="input")
+                        logger.info(f"[RunningHubSora2VideoProvider] Uploaded external image to RH: fileName={stored}")
+                        return stored
         except Exception:
+            # 下载或上传失败则回退为原始 URL
             pass
-        # 回退为原始传入
+        # 其他情况（非法 URL、本地路径等）直接回退为原始传入，交由工作流处理
         return image_url
 
     async def generate(self, prompt: str, image_url: Optional[str], duration: int = 10, async_mode: bool = False) -> dict:
@@ -59,6 +60,7 @@ class RunningHubSora2VideoProvider:
         # 组装 nodeInfoList（根据用户说明）
         # node id=40，fieldName=image -> 使用上传后的 fileName 或外链 URL
         # node id=41，fieldName=prompt
+        # 始终优先使用场景分镜头图片（调用方已传入 scene 的 image_url）
         image_ref = await self._maybe_upload_image(image_url)
         node_info_list = []
         if image_ref:

@@ -34,6 +34,20 @@ class OpenRouterClient:
         if not self.api_key:
             raise OpenRouterError("缺少 OPENROUTER_API_KEY（或兼容的 LLM_API_KEY）")
         self.referer = referer or os.getenv("EMBEDDING_REFERER") or os.getenv("SITE_URL") or "https://saleagent.app"
+        # 代理支持：优先使用 OPENROUTER_PROXY，其次 HTTP_PROXY/HTTPS_PROXY
+        proxy = os.getenv("OPENROUTER_PROXY")
+        http_proxy = os.getenv("OPENROUTER_HTTP_PROXY") or os.getenv("HTTP_PROXY")
+        https_proxy = os.getenv("OPENROUTER_HTTPS_PROXY") or os.getenv("HTTPS_PROXY")
+        if proxy:
+            self.proxies: Optional[dict] = {"http://": proxy, "https://": proxy}
+        elif http_proxy or https_proxy:
+            self.proxies = {}
+            if http_proxy:
+                self.proxies["http://"] = http_proxy
+            if https_proxy:
+                self.proxies["https://"] = https_proxy
+        else:
+            self.proxies = None
         self.title = title
 
     def _headers(self) -> Dict[str, str]:
@@ -47,7 +61,7 @@ class OpenRouterClient:
         return headers
 
     async def chat_completions(self, model: str, messages: List[Dict[str, Any]], temperature: float = 0.7, max_tokens: int = 512, response_format: Optional[Dict[str, Any]] = None) -> str:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, proxies=self.proxies) as client:
             request_payload = {
                 "model": model,
                 "messages": messages,
@@ -175,5 +189,49 @@ class OpenRouterClient:
                 logger.error(f"[OpenRouterClient] Exception while parsing response: {e}")
                 logger.error(f"[OpenRouterClient] Full response data: {json.dumps(data, ensure_ascii=False, default=str)[:2000]}")
                 raise OpenRouterError(f"无效响应：{data}")
+
+    async def chat(
+        self,
+        *,
+        model: str,
+        system: Optional[str] = None,
+        messages: List[Dict[str, Any]] = [],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        msgs = list(messages)
+        if system:
+            msgs = [{"role": "system", "content": system}] + msgs
+        request_payload: Dict[str, Any] = {
+            "model": model,
+            "messages": msgs,
+        }
+        if temperature is not None:
+            request_payload["temperature"] = float(temperature)
+        if max_tokens is not None:
+            request_payload["max_tokens"] = int(max_tokens)
+        if response_format:
+            request_payload["response_format"] = response_format
+        async with httpx.AsyncClient(timeout=60, proxies=self.proxies) as client:
+            r = await client.post(
+                f"{self.api_base}/chat/completions",
+                headers=self._headers(),
+                json=request_payload,
+            )
+            if r.status_code != 200:
+                raise OpenRouterError(f"HTTP {r.status_code}: {r.text}")
+            return r.json()
+
+    def pick_content(self, resp: Dict[str, Any]) -> Optional[str]:
+        try:
+            choices = resp.get("choices") or []
+            msg = (choices[0] or {}).get("message", {}) if choices else {}
+            content = msg.get("content")
+            if isinstance(content, list):
+                return "".join([str(x.get("text") or "") for x in content])
+            return content
+        except Exception:
+            return None
 
 

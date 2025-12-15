@@ -93,6 +93,7 @@ export function AgentDialog({
         if (!line) continue;
         try {
           const evt = JSON.parse(line) as EventItem;
+          try { console.log("[SSE/crewai-agent]", evt); } catch {}
           setEvents((prev) => {
             const next = [...prev, evt];
             onEventsChange?.(next);

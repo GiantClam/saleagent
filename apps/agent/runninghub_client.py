@@ -114,7 +114,7 @@ class RunningHubClient:
             "workflowId": workflow_id, 
             "nodeInfoList": node_info_list
         }
-        logger.debug(f"[RunningHubClient] Request payload: {payload}")
+        logger.info(f"[RunningHubClient] Request payload: {payload}")
         
         try:
             data = await self._post_json(

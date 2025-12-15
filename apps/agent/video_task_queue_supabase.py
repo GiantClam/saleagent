@@ -342,14 +342,19 @@ class SupabaseVideoTaskQueue:
                 # 同步模式，直接完成
                 video_url = result.get("video_url") if isinstance(result, dict) else str(result)
                 if video_url:
-                    # 上传到 R2
-                    if 'r2' not in sys.modules:
-                        from r2 import upload_url_to_r2
+                    # 上传到 R2（若不可用则使用原始 URL）
+                    try:
+                        from .r2 import upload_url_to_r2
+                    except ImportError:
+                        try:
+                            from r2 import upload_url_to_r2
+                        except ImportError:
+                            upload_url_to_r2 = None
+                    cdn_url = video_url
+                    if upload_url_to_r2:
+                        cdn_url = await upload_url_to_r2(video_url, f"{run_id}_clip{clip_idx}.mp4")
                     else:
-                        r2_module = importlib.import_module('r2')
-                        upload_url_to_r2 = r2_module.upload_url_to_r2
-                    
-                    cdn_url = await upload_url_to_r2(video_url, f"{run_id}_clip{clip_idx}.mp4")
+                        self.logger.warning("[SupabaseVideoTaskQueue] R2 upload not available, using original URL")
                     
                     self.supabase.table("video_tasks")\
                         .update({
@@ -364,7 +369,10 @@ class SupabaseVideoTaskQueue:
                     
                     # 检查是否所有任务完成，如果完成则触发拼接回调
                     try:
-                        from crewai_session_manager import get_session_manager
+                        try:
+                            from .crewai_session_manager import get_session_manager
+                        except ImportError:
+                            from crewai_session_manager import get_session_manager
                         session_manager = get_session_manager()
                         if session_manager:
                             # 异步检查并触发拼接（不阻塞）
@@ -472,16 +480,19 @@ class SupabaseVideoTaskQueue:
                             break
                 
                 if video_url:
-                    # 上传到 R2
-                    import sys
-                    import importlib
-                    if 'r2' not in sys.modules:
-                        from r2 import upload_url_to_r2
+                    # 上传到 R2（若不可用则使用原始 URL）
+                    try:
+                        from .r2 import upload_url_to_r2
+                    except ImportError:
+                        try:
+                            from r2 import upload_url_to_r2
+                        except ImportError:
+                            upload_url_to_r2 = None
+                    cdn_url = video_url
+                    if upload_url_to_r2:
+                        cdn_url = await upload_url_to_r2(video_url, f"{run_id}_task{clip_idx}.mp4")
                     else:
-                        r2_module = importlib.import_module('r2')
-                        upload_url_to_r2 = r2_module.upload_url_to_r2
-                    
-                    cdn_url = await upload_url_to_r2(video_url, f"{run_id}_task{clip_idx}.mp4")
+                        self.logger.warning("[SupabaseVideoTaskQueue] R2 upload not available, using original URL")
                     
                     # 更新数据库
                     self.supabase.table("video_tasks")\
@@ -500,7 +511,10 @@ class SupabaseVideoTaskQueue:
                     
                     # 检查是否所有任务完成，如果完成则触发拼接回调
                     try:
-                        from crewai_session_manager import get_session_manager
+                        try:
+                            from crewai_session_manager import get_session_manager
+                        except ImportError:
+                            from .crewai_session_manager import get_session_manager
                         session_manager = get_session_manager()
                         if session_manager:
                             # 立即检查并触发拼接（不阻塞，使用 create_task）
@@ -623,15 +637,18 @@ class SupabaseVideoTaskQueue:
                             )
                             if url and isinstance(url, str) and ("mp4" in url.lower() or url.lower().endswith(".mp4")):
                                 # 上传到 R2
-                                import sys
-                                import importlib
-                                if 'r2' not in sys.modules:
-                                    from r2 import upload_url_to_r2
+                                try:
+                                    from .r2 import upload_url_to_r2
+                                except ImportError:
+                                    try:
+                                        from r2 import upload_url_to_r2
+                                    except ImportError:
+                                        upload_url_to_r2 = None
+                                cdn_url = url
+                                if upload_url_to_r2:
+                                    cdn_url = await upload_url_to_r2(url, f"{task.get('run_id')}_clip{task.get('clip_idx')}.mp4")
                                 else:
-                                    r2_module = importlib.import_module('r2')
-                                    upload_url_to_r2 = r2_module.upload_url_to_r2
-                                
-                                cdn_url = await upload_url_to_r2(url, f"{task.get('run_id')}_clip{task.get('clip_idx')}.mp4")
+                                    self.logger.warning("[SupabaseVideoTaskQueue] R2 upload not available, using original URL")
                                 
                                 # 更新数据库
                                 self.supabase.table("video_tasks")\

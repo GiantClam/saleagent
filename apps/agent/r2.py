@@ -68,3 +68,32 @@ async def upload_url_to_r2(url: str, key: str, bucket: str = None) -> str:
     return f"https://pub-{account_id}.r2.dev/{key}"
 
 
+def presign_put_url(key: str, bucket: str = None, content_type: str = "application/octet-stream", expires: int = 3600) -> dict:
+    """
+    生成 Cloudflare R2 的预签名 PUT URL，用于浏览器直传大文件。
+    返回 {"upload_url", "key", "bucket", "headers", "public_url"}
+    """
+    bucket = bucket or os.getenv("R2_BUCKET", "video")
+    r2 = get_r2_client()
+    if not r2:
+        raise RuntimeError("R2 is not configured")
+    url = r2.generate_presigned_url(
+        ClientMethod="put_object",
+        Params={"Bucket": bucket, "Key": key, "ContentType": content_type},
+        ExpiresIn=expires,
+    )
+    public_base = os.getenv("R2_PUBLIC_BASE")
+    if public_base:
+        public_url = f"{public_base.rstrip('/')}/{key}"
+    else:
+        account_id = os.getenv("R2_ACCOUNT_ID")
+        public_url = f"https://pub-{account_id}.r2.dev/{key}"
+    return {
+        "upload_url": url,
+        "key": key,
+        "bucket": bucket,
+        "headers": {"Content-Type": content_type},
+        "public_url": public_url,
+    }
+
+

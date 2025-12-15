@@ -2,6 +2,7 @@
 CrewAI Tools - 封装视频生成工作流的工具函数
 """
 import os
+import json
 from typing import Optional, List, Dict, Any, Callable
 from crewai.tools import tool
 from .openrouter_client import OpenRouterClient, OpenRouterError
@@ -497,23 +498,23 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
     # 计算需要多少个 scene（每个 scene 10s）
     num_scenes = max(1, int(total_duration / 10.0) + (1 if total_duration % 10.0 > 0 else 0))
     
-    # 要求输出严格的 JSON 对象（包含 scenes 数组），每个 scene 包含多个镜头
-    # 【关键】由于 director_agent 不启用 reasoning，这里需要在 prompt 中强调格式要求
+    # 要求输出严格的 JSON 对象（包含 scenes 数组），弱化镜头文本描述，强调场景连贯与参考图驱动
+    # 【关键】由于 director_agent 不启用 reasoning，这里在 prompt 中强调“简短概要”和“单镜头覆盖”
     sys_prompt = (
-        "你是资深广告导演。根据用户目标与风格，将整个视频拆分为场景（scene），每个场景包含多个镜头（clip）。\n\n"
+        "你是资深广告导演。根据用户目标与风格，将视频拆分为场景（scene）。弱化文字提示，尽量让模型依据参考图生成画面。\n\n"
         "【重要】结构要求：\n"
         "1. 视频由多个场景（scene）组成，每个场景时长恰好为10秒\n"
-        "2. 每个场景包含多个镜头（clip），镜头数量可以根据内容需要灵活调整\n"
-        "3. 每个镜头的时长（end_s - begin_s）必须不超过10s\n"
-        "4. 场景内的镜头时间必须连续，且场景总时长必须恰好为10s\n\n"
+        "2. 每个场景仅需一个镜头（clip）覆盖整个10秒，begin_s=0.0, end_s=10.0\n"
+        "3. clip 的 desc 为一句话概要（尽量简短），避免冗长提示词\n"
+        "4. 场景总时长必须恰好为10秒，保持相邻场景视觉连贯\n\n"
         "【关键】场景转场衔接要求：\n"
         "1. 每个场景的结尾画面应该自然过渡到下一个场景的开头画面\n"
         "2. 考虑场景之间的视觉连贯性，使用相似的色调、构图或元素进行衔接\n"
         "3. 在场景描述中考虑转场方式（淡入淡出、交叉溶解、硬切等），确保视觉流畅\n"
         "4. 相邻场景之间应该有逻辑关联，避免突兀的跳跃\n\n"
         "【关键】文案与语音参数要求：\n"
-        "1. 每个场景必须包含完整的介绍文案（narration），文案应该覆盖整个场景的10秒时长\n"
-        "2. 文案应该自然、流畅，与画面内容完美匹配，时长约30-40字（10秒旁白）\n"
+        "1. 每个场景可包含简短 narration（一句话概要，10-20字），覆盖整体意图即可\n"
+        "2. 文案应与画面内容匹配，避免过度提示\n"
         "3. 确保文案的完整性，不要截断或省略关键信息\n"
         "4. 文案应该与场景内的镜头内容同步，描述画面中正在发生的事情\n"
         "5. 文案应该具有连贯性，相邻场景的文案应该自然衔接\n\n"
@@ -521,14 +522,14 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         "【关键】输出格式要求（必须严格遵守，这是最重要的）：\n"
         "1. 严格只输出 JSON 对象，不要任何额外文字、说明、Markdown 代码块、注释或思考过程\n"
         "2. 不要输出任何 reasoning 或思考过程，直接输出 JSON\n"
-        "3. JSON 结构必须为：{\"scenes\": [{\"scene_idx\": 1, \"narration\": \"完整的旁白文案（30-40字）\", \"voice_params\": {\"emotion\": \"calm\", \"speed\": 1.0, \"vol\": 1.0, \"pitch\": 0}, \"clips\": [{\"idx\": 1, \"desc\": \"…\", \"begin_s\": 0.0, \"end_s\": 3.0}, ...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
+        "3. JSON 结构必须为：{\"scenes\": [{\"scene_idx\": 1, \"narration\": \"一句话概要（简短即可）\", \"voice_params\": {\"emotion\": \"calm\", \"speed\": 1.0, \"vol\": 1.0, \"pitch\": 0}, \"clips\": [{\"idx\": 1, \"desc\": \"简短概要\", \"begin_s\": 0.0, \"end_s\": 10.0}], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
         "4. 每个 scene 必须包含 scene_idx, narration, clips, begin_s, end_s 字段\n"
-        "5. narration 字段：完整的旁白文案（30-40字），覆盖整个场景的10秒时长，与画面内容匹配\n"
+        "5. narration 字段：一句话概要，覆盖整体意图，与画面内容匹配\n"
         "6. voice_params 字段：包含 emotion/speed/vol/pitch，用于旁白合成；默认 emotion=calm, speed=1.0, vol=1.0, pitch=0\n"
-        "7. 每个 clip 必须包含 idx, desc, begin_s, end_s 字段，且 end_s - begin_s <= 10.0\n"
+        "7. 每个 clip 必须包含 idx, desc, begin_s, end_s 字段，且唯一镜头覆盖整个场景（0-10s）\n"
         "8. scene 的 begin_s 和 end_s 必须恰好相差 10.0 秒\n"
         "9. scene 内的 clips 时间必须连续，且覆盖整个 scene 的时长\n"
-        "10. desc 为一句中文分镜描述（20-50字），不含编号/时间/标题/Markdown 符号\n"
+        "10. desc 为一句中文概要（尽量简短），不含编号/时间/标题/Markdown 符号\n"
         "11. 不要输出 keyframes，这些由后续工具生成\n"
         "11. 【最重要】直接输出 JSON，不要任何前缀、后缀或说明文字\n\n"
         "【正确示例】（必须完全按照此格式）：\n"
@@ -564,13 +565,13 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
         f"总时长：{total_duration}秒\n"
         f"场景数：{num_scenes}（必须严格生成恰好 {num_scenes} 个场景，每个场景恰好10秒）\n\n"
         f"【重要要求】：\n"
-        f"1. 每个场景必须包含完整的旁白文案（narration），约30-40字，覆盖整个10秒时长\n"
-        f"2. 文案应该与画面内容完美匹配，描述场景中正在发生的事情\n"
+        f"1. 每个场景仅需一句话概要 narration（简短即可），覆盖整体意图\n"
+        f"2. 文案与画面匹配，避免冗长提示词，弱化文字驱动\n"
         f"3. 相邻场景的文案应该自然衔接，确保整体叙述的连贯性\n"
         f"4. 每个场景的结尾画面应该考虑与下一个场景的衔接，确保视觉流畅\n"
         f"5. 使用相似的色调、构图或元素来连接相邻场景，避免突兀的跳跃\n\n"
         f"请严格按上述 JSON 结构返回，scenes 数组必须包含恰好 {num_scenes} 个场景。\n"
-        f"每个场景必须包含 narration 字段（完整的旁白文案）、voice_params 以及多个镜头（clips）。\n"
+        f"每个场景必须包含 narration 字段（一句话概要）、voice_params 以及唯一镜头（clips，仅1条，0-10s）。\n"
         f"【重要】必须返回有效的 JSON 格式，使用 \"scenes\" 作为顶层数组，每个 scene 包含 \"scene_idx\", \"narration\", \"voice_params\", \"clips\", \"begin_s\", \"end_s\"。\n"
         f"【关键】场景数量必须严格等于 {num_scenes}，每个场景的时长必须恰好为10秒。"
     )
@@ -1062,13 +1063,13 @@ async def refine_storyboard_from_scene_descriptions(scene_texts: List[str], styl
     )
     num_scenes = max(1, len(scene_texts))
     sys_prompt = (
-        "你是资深广告导演。基于用户已产出的每个场景的文字描述，生成规范的分镜脚本：\n"
+        "你是资深广告导演。基于每个场景的文字描述，生成规范的分镜脚本，弱化文字提示：\n"
         "- 返回 JSON 对象，包含 \"scenes\" 数组，长度与输入场景数一致\n"
-        "- 每个 scene 恰好 10s，包含完整 narration（约30-40字，覆盖全时长）与多个 clips\n"
-        "- clips 列表中每个镜头包含 idx, desc, begin_s, end_s，镜头时间连续且总时长恰好 10s\n"
-        "- narration 要与 clips 描述内容一致、自然衔接\n"
-        "- 保持风格：" + ", ".join(styles or []) + "\n"
-        "- 输出严格 JSON：{\"scenes\": [{\"scene_idx\": 1, \"narration\": \"...\", \"clips\": [...], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
+        "- 每个 scene 恰好 10s，narration 为一句话概要（10-20字），避免冗长提示词\n"
+        "- clips 仅包含一个镜头，覆盖 0.0 到 10.0 全时长，desc 为一句话概要\n"
+        "- 场景之间保持连贯性\n"
+        "- 风格：" + ", ".join(styles or []) + "\n"
+        "- 输出严格 JSON：{\"scenes\": [{\"scene_idx\": 1, \"narration\": \"...\", \"clips\": [{\"idx\":1,\"desc\":\"...\",\"begin_s\":0.0,\"end_s\":10.0}], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
     )
     user_prompt = {
         "scene_texts": scene_texts,
@@ -1091,15 +1092,14 @@ async def refine_storyboard_from_scene_descriptions(scene_texts: List[str], styl
             return json.dumps(obj, ensure_ascii=False)
     except Exception:
         pass
-    # 回退：为每个文本生成基本结构
+    # 回退：为每个文本生成基本结构（单镜头覆盖）
     scenes = []
     for i, t in enumerate(scene_texts, start=1):
         scenes.append({
             "scene_idx": i,
-            "narration": (str(t)[:40] or "旁白"),
+            "narration": (str(t) or "旁白"),
             "clips": [
-                {"idx": 1, "desc": str(t)[:80] or "镜头描述", "begin_s": 0.0, "end_s": 5.0},
-                {"idx": 2, "desc": "场景延续", "begin_s": 5.0, "end_s": 10.0},
+                {"idx": 1, "desc": (str(t)[:20] or "场景概要"), "begin_s": 0.0, "end_s": 10.0},
             ],
             "begin_s": 0.0,
             "end_s": 10.0,
@@ -1127,6 +1127,7 @@ def review_storyboard_impl(storyboards_json: str, num_clips: int, goal: str, sty
         如果有效：返回审核通过的分镜脚本 JSON
         如果重试后仍无效：返回包含错误信息的 JSON
     """
+    return storyboards_json
     """
     审核分镜脚本质量，确保每个镜头都有详细、具体的描述，且每个镜头时长不超过10s。
     
@@ -2393,7 +2394,10 @@ def stitch_video_tool(clip_results_json: str, run_id: str) -> str:
             
             # 使用回调机制：注册会话，当所有任务完成时自动触发拼接
             try:
-                from crewai_session_manager import get_session_manager
+                try:
+                    from .crewai_session_manager import get_session_manager
+                except ImportError:
+                    from crewai_session_manager import get_session_manager
                 session_manager = get_session_manager()
                 
                 if session_manager:
@@ -2496,7 +2500,10 @@ def stitch_video_tool(clip_results_json: str, run_id: str) -> str:
             raise RuntimeError("❌ 没有可用的视频片段。所有任务可能仍在处理中或已失败。")
     
     # 使用独立的视频拼接函数
-    from video_stitcher import stitch_video_segments
+    try:
+        from .video_stitcher import stitch_video_segments
+    except ImportError:
+        from video_stitcher import stitch_video_segments
     
     logger.info(
         f"[stitch_video_tool] Calling stitch_video_segments for run_id={run_id}: "

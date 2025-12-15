@@ -116,7 +116,11 @@ async def stitch_video_segments(
             out_path = os.path.join(tmpdir, f"clip_{i}_processed.mp4")
             # 优先尝试使用 MoviePy 进行语音合成与字幕烧录，避免 FFmpeg 路径兼容问题
             try:
-                from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip, concatenate_videoclips
+                try:
+                    from moviepy import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip, concatenate_videoclips
+                except Exception:
+                    from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, TextClip, concatenate_videoclips
+
                 clip = VideoFileClip(in_path)
                 try:
                     _ = float(getattr(clip, "duration", 10.0) or 10.0)
@@ -129,7 +133,6 @@ async def stitch_video_segments(
                         clip = clip.subclip(0, safe_end)
                 except Exception:
                     pass
-                # 设置音频：优先旁白，缺失则保留原音频
                 voice = None
                 if has_voice:
                     voice = AudioFileClip(voice_path)
@@ -146,9 +149,9 @@ async def stitch_video_segments(
                             clip = clip.set_audio(None)
                     except Exception:
                         pass
-                # 烧录字幕（如果存在）
                 moviepy_subs_ok = False
-                if has_subs:
+                enable_subs = os.getenv("ENABLE_SUBTITLES", "false").lower() in {"1", "true", "yes"}
+                if has_subs and enable_subs:
                     try:
                         from moviepy.video.tools.subtitles import SubtitlesClip
                         font_env = os.getenv("SUBTITLE_FONT")
@@ -199,6 +202,8 @@ async def stitch_video_segments(
                         moviepy_subs_ok = True
                     except Exception as e:
                         logger.warning(f"[video_stitcher] MoviePy subtitles failed for scene {scene_idx}: {e}")
+                elif has_subs and not enable_subs:
+                    logger.info(f"[video_stitcher] Subtitles disabled by config for scene {scene_idx}")
                 clip.write_videofile(
                     out_path,
                     codec="libx264",
@@ -208,7 +213,7 @@ async def stitch_video_segments(
                     logger=None,
                 )
                 try:
-                    if has_subs and not moviepy_subs_ok:
+                    if has_subs and not moviepy_subs_ok and enable_subs:
                         import subprocess
                         font_env = os.getenv("SUBTITLE_FONT") or "Arial Unicode MS"
                         fontsize = int(os.getenv("SUBTITLE_FONTSIZE", "42"))
@@ -260,7 +265,10 @@ async def stitch_video_segments(
         
         used_moviepy_concat = False
         try:
-            from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips
+            try:
+                from moviepy import VideoFileClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips
+            except Exception:
+                from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips
             clips = [VideoFileClip(p) for p in processed_paths]
             # 额外安全裁剪每个片段的尾部，避免读取最后一帧时报 0 字节的告警
             safe_trim = float(os.getenv("SAFE_TRIM_SECS", "0.05") or 0.05)
