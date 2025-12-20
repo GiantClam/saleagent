@@ -34,7 +34,7 @@ class SceneRunningHubImageProvider:
             )
             submit = await client.post(
                 "https://www.runninghub.cn/task/openapi/create",
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "Host": "www.runninghub.cn"},
                 json={
                     "apiKey": self.api_key,
                     "workflowId": self.workflow_id,
@@ -42,6 +42,7 @@ class SceneRunningHubImageProvider:
                 },
             )
             
+
             # 检查 HTTP 状态码
             if submit.status_code != 200:
                 error_text = submit.text
@@ -91,52 +92,20 @@ class SceneRunningHubImageProvider:
 
             image_url = None
             # 轮询任务状态：/task/openapi/status
+            # 轮询任务状态
             for _ in range(60):
-                status_resp = await client.post(
-                    "https://www.runninghub.cn/task/openapi/status",
-                    headers={"Content-Type": "application/json"},
-                    json={
-                        "apiKey": self.api_key,
-                        "taskId": task_id
-                    },
-                )
+                await asyncio.sleep(3)
+                
+                try:
+                    task_status = await client.get_status(task_id)
+                    logger.info(f"[RunningHub] image.generate status: {task_status}")
+                except Exception as e:
+                    logger.warning(f"[RunningHub] get_status failed: {e}")
+                    continue
 
-                # 检查 HTTP 状态码
-                if status_resp.status_code != 200:
-                    error_text = status_resp.text
-                    try:
-                        error_json = status_resp.json()
-                        error_code = error_json.get("code")
-                        error_msg = error_json.get("msg") or error_json.get("message", "")
-                        if error_code == 412 and "TOKEN_INVALID" in (error_msg or ""):
-                            raise RuntimeError(
-                                f"RunningHub API Key 无效或已过期。"
-                                f"请检查环境变量 RUNNINGHUB_API_KEY 是否正确。"
-                                f"错误详情：{error_msg}"
-                            )
-                        else:
-                            raise RuntimeError(
-                                f"查询任务状态失败 (HTTP {status_resp.status_code})：{error_msg or error_text}"
-                            )
-                    except ValueError:
-                        raise RuntimeError(
-                            f"查询任务状态失败 (HTTP {status_resp.status_code})：{error_text}"
-                        )
-
-                status_data = status_resp.json()
-
-                # 检查 API 业务码（0 为成功）
-                if status_data.get("code") not in (0, None):
-                    error_code = status_data.get("code")
-                    error_msg = status_data.get("msg") or status_data.get("message", "")
-                    raise RuntimeError(
-                        f"查询任务状态失败 (code: {error_code})：{error_msg}"
-                    )
-
-                task_status = (status_data.get("data") or "").upper()
-                logger.info(f"[RunningHub] image.generate status: {task_status}")
-                if task_status in {"SUCCESS"}:
+                if task_status == "SUCCESS":
                     # 成功：拉取结果
+                    logger.info(f"[RunningHub] Task {task_id} SUCCESS, fetching outputs...")
                     outputs_resp = await client.post(
                         "https://www.runninghub.cn/task/openapi/outputs",
                         headers={"Content-Type": "application/json"},
@@ -145,15 +114,14 @@ class SceneRunningHubImageProvider:
                             "taskId": task_id
                         },
                     )
+                    
                     if outputs_resp.status_code != 200:
-                        raise RuntimeError(
-                            f"获取任务结果失败 (HTTP {outputs_resp.status_code})：{outputs_resp.text}"
-                        )
+                        raise RuntimeError(f"获取任务结果失败 (HTTP {outputs_resp.status_code})：{outputs_resp.text}")
+                        
                     outputs_data = outputs_resp.json()
                     if outputs_data.get("code") not in (0, None):
-                        raise RuntimeError(
-                            f"获取任务结果失败 (code: {outputs_data.get('code')})：{outputs_data.get('msg') or outputs_data.get('message','')}"
-                        )
+                        raise RuntimeError(f"获取任务结果失败 (code: {outputs_data.get('code')})：{outputs_data.get('msg') or outputs_data.get('message','')}")
+                        
                     outputs = outputs_data.get("data") or []
                     for item in outputs:
                         url = item.get("fileUrl") or item.get("url")
@@ -162,7 +130,8 @@ class SceneRunningHubImageProvider:
                             image_url = url
                             break
                     break
-                elif task_status in {"FAILED"}:
+
+                elif task_status == "FAILED":
                     try:
                         query_resp = await client.post(
                             "https://www.runninghub.cn/task/openapi/query",
@@ -177,9 +146,7 @@ class SceneRunningHubImageProvider:
                     except Exception:
                         pass
                     raise RuntimeError("任务失败：请检查工作流与入参")
-
-                await asyncio.sleep(3)
-
+            
             if not image_url:
                 raise RuntimeError("未在超时时间内获得图片结果")
             return image_url
@@ -189,7 +156,7 @@ class SceneRunningHubImageProvider:
 
         返回 {"image_url": <图片URL>, "desc_text": <文字描述>}。
         """
-        from .runninghub_client import RunningHubClient, RunningHubError
+        from runninghub_client import RunningHubClient, RunningHubError
         import httpx
         client = RunningHubClient(api_key=os.getenv("RUNNINGHUB_API_KEY"))
         # 直接使用当前 provider 的 workflow_id（来自 RUNNINGHUB_IMAGE_WORKFLOW_ID）
@@ -201,7 +168,7 @@ class SceneRunningHubImageProvider:
             f"画面没有字幕、没有中文，如果画面中出现中文字那么中文字的书写要准确无误，人物特征要保持一致性，人物清晰且没有崩坏"
         )
         if "6格分镜图" not in text:
-            text = f"{text}。{fixed_hint}"
+            text = f"{fixed_hint}。{text}。"
 
         # 处理参考图：RunningHub 支持两类输入
         # 1) 平台内部相对路径（如 'api/xxxx.jpg'）——直接作为节点值传入
@@ -210,8 +177,7 @@ class SceneRunningHubImageProvider:
             u = str(url or "").strip()
             if not u:
                 return u
-            if u.startswith("api/"):
-                return u.replace("api/", "", 1)
+            
             if u.startswith("http://") or u.startswith("https://"):
                 try:
                     async with httpx.AsyncClient(timeout=60) as c:
@@ -220,6 +186,7 @@ class SceneRunningHubImageProvider:
                             file_name = (u.split("/")[-1] or "image.png")
                             try:
                                 stored = await client.upload_bytes(resp.content, file_name, file_type="input")
+                                
                                 logging.getLogger("workflow").info(f"[RunningHub] Uploaded external image: {stored}")
                                 return stored
                             except Exception as e:
@@ -247,13 +214,27 @@ class SceneRunningHubImageProvider:
             if st == "SUCCESS":
                 outs = await client.get_outputs(task_id)
                 for it in outs:
-                    url = (
-                        it.get("fileUrl") or it.get("url") or it.get("ossUrl") or it.get("downloadUrl")
-                        or (it.get("value") if isinstance(it.get("value"), str) else None)
-                    )
+                    # Search for a valid HTTP URL across potential keys
+                    candidates = [
+                        it.get("fileUrl"),
+                        it.get("value") if isinstance(it.get("value"), str) else None
+                    ]
+                    
+                    url = None
+                    for cand in candidates:
+                        if cand and isinstance(cand, str):
+                            cand_s = cand.strip()
+                            if cand_s.lower().startswith(("http://", "https://")):
+                                url = cand_s
+                                break
+                    
                     if not url:
+                        # No valid URL found in this item
                         continue
+
                     ul = str(url).lower()
+
+
                     if any(ul.endswith(ext) for ext in [".png", ".jpg", ".jpeg"]):
                         img_url = url
                     elif any(ul.endswith(ext) for ext in [".json", ".txt"]):
@@ -287,12 +268,26 @@ class SceneRunningHubImageProvider:
 
 async def _log_rh_task_detail(task_id: str, tag: str) -> None:
     async with httpx.AsyncClient(timeout=60) as hc:
-        qr = await hc.post(
-            "https://www.runninghub.cn/task/openapi/query",
-            headers={"Content-Type": "application/json"},
-            json={"apiKey": os.getenv("RUNNINGHUB_API_KEY"), "taskId": task_id},
-        )
-        if qr.status_code == 200:
-            logging.getLogger("workflow").warning(f"[RunningHub] scene.generate {tag} detail: {qr.json()}")
+        # Try finding the right endpoint/payload for query
+        # Some versions of API might expect int taskId
+        payload = {"apiKey": os.getenv("RUNNINGHUB_API_KEY"), "taskId": task_id}
+        
+        try:
+            qr = await hc.post(
+                "https://www.runninghub.cn/task/openapi/query",
+                headers={"Content-Type": "application/json"},
+                json=payload,
+            )
+            if qr.status_code == 200:
+                data = qr.json()
+                # code 404 means task not found in query (maybe too fresh or wrong endpoint)
+                if data.get("code") == 404:
+                     logging.getLogger("workflow").warning(f"[RunningHub] Task {task_id} not found in query endpoint.")
+                else:
+                     logging.getLogger("workflow").warning(f"[RunningHub] scene.generate {tag} detail: {data}")
+            else:
+                 logging.getLogger("workflow").warning(f"[RunningHub] Failed to query task detail (HTTP {qr.status_code})")
+        except Exception as e:
+            logging.getLogger("workflow").warning(f"[RunningHub] Query exception: {e}")
 
 

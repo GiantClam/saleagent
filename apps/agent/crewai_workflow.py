@@ -1,6 +1,6 @@
 from typing import Dict, Any, List
 from crewai import Task, Crew, Process
-from .crewai_agents import build_agents
+from crewai_agents import build_agents
 
 
 def build_crew(payload: Dict[str, Any]) -> Crew:
@@ -9,6 +9,8 @@ def build_crew(payload: Dict[str, Any]) -> Crew:
     total_duration: float = float(payload.get("total_duration", 6.0) or 6.0)
     num_clips: int = int(payload.get("num_clips", 1) or 1)
     image_control: bool = bool(payload.get("image_control", False))
+    enable_narration: bool = bool(payload.get("enable_narration", False))
+    enable_bgm: bool = bool(payload.get("enable_bgm", False))
     run_id: str = payload.get("run_id", "")
     
     # 从对话收集的信息

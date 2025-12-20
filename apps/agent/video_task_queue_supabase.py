@@ -283,12 +283,21 @@ class SupabaseVideoTaskQueue:
                         f"[SupabaseVideoTaskQueue] Processing submitted task: "
                         f"task_id={task_id}, provider_task_id={provider_task_id}, run_id={run_id}, clip_idx={clip_idx}"
                     )
-                    await self._poll_runninghub_task(task_id, provider_task_id, run_id, clip_idx)
+                    await self._poll_runninghub_task(task_id, provider_task_id, run_id, clip_idx, retry_count)
                 else:
                     self.logger.warning(
                         f"[SupabaseVideoTaskQueue] Task {task_id} is submitted but has no provider_task_id, "
-                        f"cannot poll RunningHub"
+                        f"marking as failed to unblock queue"
                     )
+                    # Mark as failed to unblock the serial queue
+                    self.supabase.table("video_tasks")\
+                        .update({
+                            "status": "failed",
+                            "error": "Submission failed (no provider_task_id)",
+                            "updated_at": datetime.utcnow().isoformat()
+                        })\
+                        .eq("id", task_id)\
+                        .execute()
                 return
             
             # 更新状态为 processing（仅对 pending 状态的任务）
@@ -305,7 +314,7 @@ class SupabaseVideoTaskQueue:
             import sys
             import importlib
             if 'apps.agent.providers' not in sys.modules and 'providers' not in sys.modules:
-                from .providers import get_video_provider
+                from providers import get_video_provider
             else:
                 try:
                     providers_module = importlib.import_module('apps.agent.providers')
@@ -344,7 +353,7 @@ class SupabaseVideoTaskQueue:
                 if video_url:
                     # 上传到 R2（若不可用则使用原始 URL）
                     try:
-                        from .r2 import upload_url_to_r2
+                        from r2 import upload_url_to_r2
                     except ImportError:
                         try:
                             from r2 import upload_url_to_r2
@@ -370,7 +379,7 @@ class SupabaseVideoTaskQueue:
                     # 检查是否所有任务完成，如果完成则触发拼接回调
                     try:
                         try:
-                            from .crewai_session_manager import get_session_manager
+                            from crewai_session_manager import get_session_manager
                         except ImportError:
                             from crewai_session_manager import get_session_manager
                         session_manager = get_session_manager()
@@ -422,25 +431,46 @@ class SupabaseVideoTaskQueue:
                         f"[SupabaseVideoTaskQueue] Task {task_id} failed after {max_retries} retries"
                     )
             else:
-                # 其他错误
-                self.supabase.table("video_tasks")\
-                    .update({
-                        "status": "failed",
-                        "error": error_str,
-                        "updated_at": datetime.utcnow().isoformat()
-                    })\
-                    .eq("id", task_id)\
-                    .execute()
+                # 其他错误 (Generic Errors)
+                # 增加通用重试机制 (max 3 times)
+                retry_count += 1
+                max_general_retries = 3
                 
-                self.logger.error(
-                    f"[SupabaseVideoTaskQueue] Task {task_id} failed: {error_str}",
-                    exc_info=True
-                )
+                # Check if we can retry
+                if retry_count <= max_general_retries:
+                    self.supabase.table("video_tasks")\
+                        .update({
+                            "status": "pending",
+                            "retry_count": retry_count,
+                            "error": f"Retry {retry_count}/{max_general_retries}: {error_str}",
+                            "updated_at": datetime.utcnow().isoformat()
+                        })\
+                        .eq("id", task_id)\
+                        .execute()
+                    
+                    self.logger.warning(
+                        f"[SupabaseVideoTaskQueue] Task {task_id} failed with error, retrying ({retry_count}/{max_general_retries}): {error_str}"
+                    )
+                else: 
+                    # Max retries exceeded for generic error
+                    self.supabase.table("video_tasks")\
+                        .update({
+                            "status": "failed",
+                            "error": f"Max retries ({max_general_retries}) exceeded: {error_str}",
+                            "updated_at": datetime.utcnow().isoformat()
+                        })\
+                        .eq("id", task_id)\
+                        .execute()
+                    
+                    self.logger.error(
+                        f"[SupabaseVideoTaskQueue] Task {task_id} failed after {max_general_retries} retries: {error_str}",
+                        exc_info=True
+                    )
     
-    async def _poll_runninghub_task(self, task_id: str, provider_task_id: str, run_id: str, clip_idx: int):
+    async def _poll_runninghub_task(self, task_id: str, provider_task_id: str, run_id: str, clip_idx: int, retry_count: int = 0):
         """轮询 RunningHub 任务状态，如果完成则更新数据库"""
         try:
-            from .runninghub_client import RunningHubClient
+            from runninghub_client import RunningHubClient
             client = RunningHubClient()
             
             # 检查任务状态
@@ -482,7 +512,7 @@ class SupabaseVideoTaskQueue:
                 if video_url:
                     # 上传到 R2（若不可用则使用原始 URL）
                     try:
-                        from .r2 import upload_url_to_r2
+                        from r2 import upload_url_to_r2
                     except ImportError:
                         try:
                             from r2 import upload_url_to_r2
@@ -514,7 +544,7 @@ class SupabaseVideoTaskQueue:
                         try:
                             from crewai_session_manager import get_session_manager
                         except ImportError:
-                            from .crewai_session_manager import get_session_manager
+                            from crewai_session_manager import get_session_manager
                         session_manager = get_session_manager()
                         if session_manager:
                             # 立即检查并触发拼接（不阻塞，使用 create_task）
@@ -534,19 +564,39 @@ class SupabaseVideoTaskQueue:
                         f"[SupabaseVideoTaskQueue] Task {task_id} succeeded but no video URL found"
                     )
             elif status_upper in {"FAILED", "ERROR", "FAILURE"}:
-                # 任务失败
-                self.supabase.table("video_tasks")\
-                    .update({
-                        "status": "failed",
-                        "error": f"RunningHub task failed: {status}",
-                        "updated_at": datetime.utcnow().isoformat()
-                    })\
-                    .eq("id", task_id)\
-                    .execute()
-                
-                self.logger.error(
-                    f"[SupabaseVideoTaskQueue] Task {task_id} (RunningHub {provider_task_id}) failed: {status}"
-                )
+                # 任务失败：自动重试逻辑
+                max_retries = 3
+                if retry_count < max_retries:
+                    new_retry = retry_count + 1
+                    self.logger.warning(
+                        f"[SupabaseVideoTaskQueue] RunningHub task {provider_task_id} failed, "
+                        f"retrying ({new_retry}/{max_retries})..."
+                    )
+                    
+                    self.supabase.table("video_tasks")\
+                        .update({
+                            "status": "pending",        # 重置状态为 pending
+                            "provider_task_id": None,   # 清除旧的 task id，强制重新提交
+                            "retry_count": new_retry,
+                            "error": f"Previous attempt failed: {status}",
+                            "updated_at": datetime.utcnow().isoformat()
+                        })\
+                        .eq("id", task_id)\
+                        .execute()
+                else:
+                    # 超过最大重试次数，标记失败
+                    self.supabase.table("video_tasks")\
+                        .update({
+                            "status": "failed",
+                            "error": f"RunningHub task failed after {max_retries} attempts: {status}",
+                            "updated_at": datetime.utcnow().isoformat()
+                        })\
+                        .eq("id", task_id)\
+                        .execute()
+                    
+                    self.logger.error(
+                        f"[SupabaseVideoTaskQueue] Task {task_id} (RunningHub {provider_task_id}) failed: {status}"
+                    )
             # 如果状态是 PENDING, RUNNING, QUEUED，不做任何操作，等待下次轮询
         except Exception as e:
             self.logger.warning(
@@ -619,7 +669,7 @@ class SupabaseVideoTaskQueue:
             if task.get("status") == "submitted":
                 provider_task_id = task.get("provider_task_id")
                 if provider_task_id:
-                    from .runninghub_client import RunningHubClient
+                    from runninghub_client import RunningHubClient
                     client = RunningHubClient()
                     
                     status = await client.get_status(provider_task_id)
@@ -638,7 +688,7 @@ class SupabaseVideoTaskQueue:
                             if url and isinstance(url, str) and ("mp4" in url.lower() or url.lower().endswith(".mp4")):
                                 # 上传到 R2
                                 try:
-                                    from .r2 import upload_url_to_r2
+                                    from r2 import upload_url_to_r2
                                 except ImportError:
                                     try:
                                         from r2 import upload_url_to_r2
@@ -707,7 +757,7 @@ def get_supabase_queue() -> Optional[SupabaseVideoTaskQueue]:
         try:
             _supabase_queue = SupabaseVideoTaskQueue(
                 retry_interval=20.0,
-                max_concurrent=2
+                max_concurrent=1
             )
             # 尝试启动 worker（如果有运行中的事件循环）
             try:

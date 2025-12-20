@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 import httpx
 
-from .runninghub_client import RunningHubClient, RunningHubError
+from runninghub_client import RunningHubClient, RunningHubError
 
 logger = logging.getLogger("crewai_tools")
 
@@ -19,26 +19,44 @@ class RunningHubSora2VideoProvider:
     async def _maybe_upload_image(self, image_url: Optional[str]) -> Optional[str]:
         if not image_url:
             return None
-        # 若是 RunningHub 相对路径（如 api/xxxx.jpg），直接作为节点输入使用
-        if image_url.startswith("api/"):
-            return image_url
-        # 对 http(s) 外链，尽量下载并上传为 RunningHub 内部 fileName，提高兼容性
+        
+        u = str(image_url).strip()
+        # 对 http(s) 外链，尽量下载并上传为 RunningHub 内部 fileName
         try:
-            if image_url.startswith("http://") or image_url.startswith("https://"):
+            if u.startswith("http://") or u.startswith("https://"):
                 async with httpx.AsyncClient(timeout=60) as c:
-                    resp = await c.get(image_url)
+                    logger.info(f"[Sora2] Downloading external image: {u}")
+                    resp = await c.get(u)
                     if resp.status_code == 200 and resp.content:
-                        file_name = image_url.split("/")[-1] or "image.png"
+                        if len(resp.content) < 100:
+                             logger.warning(f"[Sora2] Downloaded content too small ({len(resp.content)} bytes), likely not an image: {resp.content[:100]}")
+                             # Don't return here, causing fallback to original URL which is better than uploading garbage
+                             raise ValueError("Content too small")
+                        
+                        file_name = u.split("/")[-1] or "image.png"
+                        if "." not in file_name:
+                             file_name += ".png" # Ensure extension
+                             
                         stored = await self.client.upload_bytes(resp.content, file_name, file_type="input")
-                        logger.info(f"[RunningHubSora2VideoProvider] Uploaded external image to RH: fileName={stored}")
+                            
+                        logger.info(f"[Sora2] Uploaded external image to RH: fileName={stored}")
                         return stored
-        except Exception:
+                    else:
+                        logger.warning(f"[Sora2] Download failed status={resp.status_code}")
+        except Exception as e:
             # 下载或上传失败则回退为原始 URL
+            logger.warning(f"[Sora2] Upload failed, using original URL: {e}")
             pass
-        # 其他情况（非法 URL、本地路径等）直接回退为原始传入，交由工作流处理
-        return image_url
+            
+        # 其他情况（非法 URL 等）直接回退
+        return u
 
     async def generate(self, prompt: str, image_url: Optional[str], duration: int = 10, async_mode: bool = False) -> dict:
+        """
+        生成视频
+        """
+        logger.info(f"[Sora2] generate called with image_url='{image_url}', prompt='{prompt[:20]}...'")
+        
         """
         生成视频
         

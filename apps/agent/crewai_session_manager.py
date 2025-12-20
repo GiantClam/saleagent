@@ -31,10 +31,14 @@ class SessionManager:
         sess = self.supabase.table("crew_sessions")\
             .select("expected_clips,status")\
             .eq("run_id", run_id)\
-            .maybe_single()\
+            .order("created_at", desc=True)\
+            .limit(1)\
             .execute()
-        expected = int((sess.data or {}).get("expected_clips") or 0)
-        status = str((sess.data or {}).get("status") or "")
+        if not sess:
+            return
+        data = (sess.data if sess.data and len(sess.data) > 0 else [{}])[0]
+        expected = int(data.get("expected_clips") or 0)
+        status = str(data.get("status") or "")
         if status in {"stitching", "completed"}:
             return
         tasks = self.supabase.table("video_tasks")\
@@ -44,37 +48,16 @@ class SessionManager:
         items = tasks.data or []
         completed = [t for t in items if str(t.get("status") or "") == "succeeded" and t.get("video_url")]
         if expected and len(completed) >= expected:
+            # Modified: Do not auto stitch. Set status to ready_to_stitch and wait for user confirmation.
             self.supabase.table("crew_sessions")\
                 .update({
-                    "status": "stitching",
+                    "status": "ready_to_stitch",
                     "updated_at": datetime.utcnow().isoformat()
                 })\
                 .eq("run_id", run_id)\
                 .execute()
-            segments = [t["video_url"] for t in sorted(completed, key=lambda x: int(x.get("clip_idx") or 0))]
-            try:
-                try:
-                    from .video_stitcher import stitch_video_segments
-                except ImportError:
-                    from video_stitcher import stitch_video_segments
-                final_url = await stitch_video_segments(segments, run_id, f"{run_id}_final.mp4")
-                self.supabase.table("crew_sessions")\
-                    .update({
-                        "status": "completed",
-                        "result": final_url,
-                        "updated_at": datetime.utcnow().isoformat()
-                    })\
-                    .eq("run_id", run_id)\
-                    .execute()
-            except Exception as e:
-                self.supabase.table("crew_sessions")\
-                    .update({
-                        "status": "failed",
-                        "error": str(e),
-                        "updated_at": datetime.utcnow().isoformat()
-                    })\
-                    .eq("run_id", run_id)\
-                    .execute()
+            # Original auto-stitch logic removed/commented out
+            return
 
 
 def get_session_manager():

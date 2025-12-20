@@ -14,7 +14,7 @@ import tempfile
 import httpx
 import logging
 from typing import List, Optional
-from .r2 import get_r2_client
+from r2 import get_r2_client
 import boto3
 from boto3.s3.transfer import TransferConfig
 
@@ -111,6 +111,8 @@ async def stitch_video_segments(
                                 f.write(r.content)
                             has_subs = True
                             logger.info(f"[video_stitcher] Found subtitles for scene {scene_idx}")
+                        else:
+                            logger.debug(f"[video_stitcher] Subtitles not found (optional), status={r.status_code}")
                 except Exception as e:
                     logger.debug(f"[video_stitcher] Failed to fetch voice/subs for scene {scene_idx}: {e}")
             out_path = os.path.join(tmpdir, f"clip_{i}_processed.mp4")

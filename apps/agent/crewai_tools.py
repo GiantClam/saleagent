@@ -5,15 +5,15 @@ import os
 import json
 from typing import Optional, List, Dict, Any, Callable
 from crewai.tools import tool
-from .openrouter_client import OpenRouterClient, OpenRouterError
+from openrouter_client import OpenRouterClient, OpenRouterError
 import httpx
-from .providers import get_image_provider, get_video_provider
-from .r2 import upload_url_to_r2
-from .runninghub_client import RunningHubClient
+from providers import get_image_provider, get_video_provider
+from r2 import upload_url_to_r2
+from runninghub_client import RunningHubClient
 
 # 尝试导入 Supabase 队列（可选）
 try:
-    from .video_task_queue_supabase import get_supabase_queue
+    from video_task_queue_supabase import get_supabase_queue
     _supabase_queue_available = True
 except ImportError:
     _supabase_queue_available = False
@@ -481,7 +481,7 @@ import logging
 logger = logging.getLogger("crewai_tools")
 
 
-async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: float, num_clips: int) -> str:
+async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: float, num_clips: int, run_id: str = None) -> str:
     """依据目标/风格/时长生成分镜脚本草案，返回 JSON 字符串。异步版本。"""
     if not (OPENROUTER_BASE and OPENROUTER_KEY):
         raise RuntimeError("未配置 OpenRouter（OPENROUTER_API_BASE / OPENROUTER_API_KEY）")
@@ -2016,7 +2016,14 @@ def generate_video_clip_tool(video_tasks_json: str, run_id: str) -> str:
 @tool("拼接视频工具")
 def stitch_video_tool(clip_results_json: str, run_id: str) -> str:
     """
-    将多个视频片段拼接为最终视频。
+    Wrapper calling stitch_video_impl.
+    """
+    return _run_async_safe(stitch_video_impl(clip_results_json, run_id))
+
+
+def stitch_video_impl(clip_results_json: str, run_id: str) -> str:
+    """
+    将多个视频片段拼接为最终视频（内部实现，可直接调用）。
     
     【重要】此工具的行为：
     1. 首先检查 crew_sessions 表，如果 status 为 "completed" 且有 result，直接返回 result 字段的 URL。

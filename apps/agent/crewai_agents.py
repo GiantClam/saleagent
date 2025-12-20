@@ -1,6 +1,6 @@
 from typing import List
 from crewai import Agent
-from .crewai_tools import optimize_prompt_tool, generate_sora2_prompt_tool, plan_storyboard_tool, review_storyboard_tool, generate_keyframe_tool, merge_storyboards_to_video_tasks_tool, generate_video_clip_tool, stitch_video_tool, synthesize_voice_tool, synthesize_bgm_tool  # type: ignore
+from crewai_tools import optimize_prompt_tool, generate_sora2_prompt_tool, plan_storyboard_tool, review_storyboard_tool, generate_keyframe_tool, merge_storyboards_to_video_tasks_tool, generate_video_clip_tool, stitch_video_tool, synthesize_voice_tool, synthesize_bgm_tool
 
 
 def build_agents() -> List[Agent]:

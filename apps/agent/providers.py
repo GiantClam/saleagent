@@ -16,11 +16,8 @@ class VideoProvider(Protocol):
     async def generate(self, prompt: str, image_url: str, duration: int = 6) -> str: ...
 
 
-class MockImageProvider:
-    async def generate(self, prompt: str) -> str:
-        await asyncio.sleep(0.3)
-        return "https://picsum.photos/seed/ai-cover/1200/630"
 
+# MockImageProvider deleted as per request
 
 class MockVideoProvider:
     async def generate(self, prompt: str, image_url: str, duration: int = 6, **kwargs) -> str:
@@ -29,26 +26,25 @@ class MockVideoProvider:
 
 
 def get_image_provider() -> ImageProvider:
-    """选择图片 Provider，默认 qwen_runninghub；支持 mock；初始化失败则回退 mock。"""
-    provider = (os.getenv("PROVIDER_IMAGE") or "qwen_runninghub").lower()
+    """选择图片 Provider。必须通过 PROVIDER_IMAGE 环境变量配置，否则报错。"""
+    provider_name = os.getenv("PROVIDER_IMAGE")
+    if not provider_name:
+         raise ValueError("环境变量未配置：PROVIDER_IMAGE")
+    
+    provider = provider_name.lower()
     logger = logging.getLogger("workflow")
-    if provider == "mock":
-        logger.info("[providers] Using MockImageProvider")
-        return MockImageProvider()
-    try:
-        if provider == "qwen_runninghub":
-            from .providers_image_scene_runninghub import SceneRunningHubImageProvider
-            return SceneRunningHubImageProvider()
-        elif provider == "seedream":
-            from .providers_image_seedream import SeedreamImageProvider
-            return SeedreamImageProvider()
-        elif provider == "nanobanana":
-            from .providers_image_nanobanana import NanoBananaImageProvider
-            return NanoBananaImageProvider()
-        raise ValueError(f"不支持的图片 Provider: {provider}")
-    except Exception as e:
-        logger.warning(f"[providers] Image provider '{provider}' init failed: {e}; fallback to mock")
-        return MockImageProvider()
+
+    if provider == "qwen_runninghub":
+        from providers_image_scene_runninghub import SceneRunningHubImageProvider
+        return SceneRunningHubImageProvider()
+    elif provider == "seedream":
+        from providers_image_seedream import SeedreamImageProvider
+        return SeedreamImageProvider()
+    elif provider == "nanobanana":
+        from providers_image_nanobanana import NanoBananaImageProvider
+        return NanoBananaImageProvider()
+    
+    raise ValueError(f"不支持的图片 Provider: {provider}")
 
 
 def get_video_provider() -> VideoProvider:
@@ -60,13 +56,13 @@ def get_video_provider() -> VideoProvider:
         return MockVideoProvider()
     try:
         if provider == "pixverse":
-            from .providers_video_pixverse import PixVerseVideoProvider
+            from providers_video_pixverse import PixVerseVideoProvider
             return PixVerseVideoProvider()
         elif provider == "runninghub":
-            from .providers_video_runninghub import RunningHubVideoProvider
+            from providers_video_runninghub import RunningHubVideoProvider
             return RunningHubVideoProvider()
         elif provider == "sora2":
-            from .providers_video_runninghub_sora2 import RunningHubSora2VideoProvider
+            from providers_video_runninghub_sora2 import RunningHubSora2VideoProvider
             return RunningHubSora2VideoProvider()
         elif provider in {"veo3.1", "hailuo"}:
             raise ValueError(f"Provider {provider} 尚未实现")

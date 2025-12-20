@@ -61,16 +61,21 @@ class RunningHubClient:
     async def _post_json(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         c = await self._get_client()
         last_err: Optional[Exception] = None
+        # Must include Host header validation
+        headers = {
+            "Content-Type": "application/json",
+            "Host": "www.runninghub.cn"
+        }
         for attempt in range(self.max_retries + 1):
             try:
                 # 使用实例的超时配置
                 resp = await c.post(
                     url, 
-                    headers={"Content-Type": "application/json"}, 
+                    headers=headers, 
                     json=payload
                 )
                 return _assert_ok(resp)
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.TimeoutException, httpx.ConnectTimeout) as e:
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.TimeoutException, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
                 last_err = e
                 if attempt >= self.max_retries:
                     break
@@ -82,11 +87,13 @@ class RunningHubClient:
     async def _post_files(self, url: str, files: Dict[str, Any]) -> Dict[str, Any]:
         c = await self._get_client()
         last_err: Optional[Exception] = None
+        # Host header is required
+        headers = {"Host": "www.runninghub.cn"}
         for attempt in range(self.max_retries + 1):
             try:
-                resp = await c.post(url, files=files)
+                resp = await c.post(url, files=files, headers=headers)
                 return _assert_ok(resp)
-            except (httpx.ConnectError, httpx.ReadTimeout, httpx.TimeoutException, httpx.ConnectTimeout) as e:
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.TimeoutException, httpx.ConnectTimeout, httpx.RemoteProtocolError) as e:
                 last_err = e
                 if attempt >= self.max_retries:
                     break
@@ -169,9 +176,15 @@ class RunningHubClient:
         }
         data = await self._post_files("https://www.runninghub.cn/task/openapi/upload", form)
         d = data.get("data") or {}
+        import logging
+        logging.getLogger("crewai_tools").info(f"[RunningHubClient] Upload response data: {d}")
+        
         file_name = d.get("fileName")
         if not file_name:
             raise RunningHubError(f"上传返回缺少 fileName：{data}")
+            
+        if not file_name.startswith("api/"):
+            return f"api/{file_name}"
         return file_name
 
     async def aclose(self) -> None:
