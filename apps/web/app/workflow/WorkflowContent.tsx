@@ -18,7 +18,7 @@ type WorkflowStep = "collect" | "planning" | "keyframes" | "confirm" | "generati
 export function WorkflowContent() {
   const router = useRouter();
   const apiUrl = process.env.NEXT_PUBLIC_AGENT_URL || "https://api.aimarketingsite.com";
-  
+
   // 步骤1：收集用户输入
   const [step, setStep] = useState<WorkflowStep>("collect");
   const [subject, setSubject] = useState("");
@@ -30,20 +30,20 @@ export function WorkflowContent() {
   const [useBgmAgent, setUseBgmAgent] = useState(false);
   const [muteModelAudio, setMuteModelAudio] = useState(false);
   const [clipCount, setClipCount] = useState(4);
-  
+
   // 步骤2：分镜方案
   const [storyboards, setStoryboards] = useState<StoryboardItem[]>([]);
   const [planning, setPlanning] = useState(false);
-  
+
   // 步骤3：关键帧
   const [generatingKeyframes, setGeneratingKeyframes] = useState(false);
-  
+
   // 步骤4：确认与生成
   const [runId, setRunId] = useState<string | null>(null);
   const [clipResults, setClipResults] = useState<Array<{ idx: number; video_url: string; status: string }>>([]);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
+
   // 步骤5：拼接
   const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(null);
   const [stitching, setStitching] = useState(false);
@@ -158,11 +158,11 @@ export function WorkflowContent() {
     setGenerating(true);
     setStep("generating");
     setClipResults([]); // 清空之前的结果
-    
+
     try {
       const res = await fetch(`${apiUrl}/workflow/run-clips`, {
         method: "POST",
-        headers: { 
+        headers: {
           "Content-Type": "application/json",
           "Accept": "text/event-stream"
         },
@@ -171,9 +171,9 @@ export function WorkflowContent() {
           storyboards,
         }),
       });
-      
+
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      
+
       // 检查是否为 SSE 流
       const contentType = res.headers.get("content-type");
       if (contentType?.includes("text/event-stream") && res.body) {
@@ -181,27 +181,27 @@ export function WorkflowContent() {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        
+
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          
+
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() || "";
-          
+
           for (const line of lines) {
             if (line.startsWith("data: ")) {
               try {
                 const data = JSON.parse(line.slice(6));
-                try { console.log("[SSE/run-clips]", data); } catch {}
+                try { console.log("[SSE/run-clips]", data); } catch { }
                 if (data.type === "progress") {
                   // 更新单个镜头的进度
                   setClipResults((prev) => {
                     const existing = prev.find((c) => c.idx === data.clip.idx);
                     if (existing) {
-                      return prev.map((c) => 
-                        c.idx === data.clip.idx 
+                      return prev.map((c) =>
+                        c.idx === data.clip.idx
                           ? { ...c, status: data.clip.status, video_url: data.clip.video_url }
                           : c
                       );
@@ -363,8 +363,8 @@ export function WorkflowContent() {
       {step === "collect" && (
         <div style={{ background: "white", padding: 32, borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 24 }}>步骤 1：完善视频信息</h2>
-          
-        <div style={{ marginBottom: 20 }}>
+
+          <div style={{ marginBottom: 20 }}>
             <label style={{ display: "block", marginBottom: 8, fontSize: 14, fontWeight: 500 }}>产品图片URL *</label>
             <input
               type="url"
@@ -395,6 +395,8 @@ export function WorkflowContent() {
               <span style={{ fontSize: 14, fontWeight: 500 }}>禁止模型视频音轨</span>
             </label>
           </div>
+
+          <div style={{ marginBottom: 20 }}>
             <label style={{ display: "block", marginBottom: 8, fontSize: 14, fontWeight: 500 }}>主体目标 *</label>
             <textarea
               value={subject}
@@ -514,7 +516,7 @@ export function WorkflowContent() {
       {step === "planning" && storyboards.length > 0 && (
         <div style={{ background: "white", padding: 32, borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 24 }}>步骤 2：确认分镜方案</h2>
-          
+
           {storyboards.map((sb) => (
             <div key={sb.idx} style={{ marginBottom: 24, padding: 20, border: "1px solid #e5e7eb", borderRadius: 8 }}>
               <div style={{ marginBottom: 12 }}>
@@ -611,11 +613,11 @@ export function WorkflowContent() {
       {step === "keyframes" && imageControl && storyboards.length > 0 && (
         <div style={{ background: "white", padding: 32, borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 24 }}>步骤 3：编辑关键帧</h2>
-          
+
           {storyboards.map((sb) => (
             <div key={sb.idx} style={{ marginBottom: 24, padding: 20, border: "1px solid #e5e7eb", borderRadius: 8 }}>
               <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 16 }}>镜头 {sb.idx + 1}</h3>
-              
+
               <div style={{ marginBottom: 16 }}>
                 <label style={{ display: "block", marginBottom: 8, fontSize: 13 }}>首帧</label>
                 {sb.keyframes?.in && (
@@ -794,7 +796,7 @@ export function WorkflowContent() {
       {step === "generating" && (
         <div style={{ background: "white", padding: 32, borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 24 }}>步骤 5：镜头生成进度</h2>
-          
+
           {/* 总体进度 */}
           {storyboards.length > 0 && (
             <div style={{ marginBottom: 24, padding: 16, background: "#f9fafb", borderRadius: 8 }}>
@@ -816,7 +818,7 @@ export function WorkflowContent() {
               </div>
             </div>
           )}
-          
+
           {/* 各镜头进度 */}
           {storyboards.map((sb) => {
             const clipResult = clipResults.find((c) => c.idx === sb.idx);
@@ -833,7 +835,7 @@ export function WorkflowContent() {
               succeeded: "#10b981",
               failed: "#ef4444",
             };
-            
+
             return (
               <div key={sb.idx} style={{ marginBottom: 20, padding: 16, border: "1px solid #e5e7eb", borderRadius: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -868,9 +870,9 @@ export function WorkflowContent() {
                     </button>
                   )}
                 </div>
-                
+
                 <p style={{ fontSize: 13, color: "#6b7280", marginBottom: 12 }}>{sb.desc}</p>
-                
+
                 {status === "succeeded" && clipResult?.video_url && (
                   <video
                     src={clipResult.video_url}
@@ -878,7 +880,7 @@ export function WorkflowContent() {
                     style={{ width: "100%", borderRadius: 8, marginTop: 8 }}
                   />
                 )}
-                
+
                 {status === "failed" && (
                   <div style={{ padding: 12, background: "#fef2f2", borderRadius: 6, color: "#dc2626", fontSize: 13 }}>
                     生成失败，请点击"重新生成"重试
@@ -887,51 +889,51 @@ export function WorkflowContent() {
               </div>
             );
           })}
-          
+
           {/* 完成按钮 */}
-          {clipResults.length === storyboards.length && 
-           clipResults.every((c) => c.status === "succeeded") && (
-            <div style={{ marginTop: 24, display: "flex", justifyContent: "flex-end", gap: 12 }}>
-              <button
-                onClick={() => setStep("confirm")}
-                style={{
-                  padding: "12px 24px",
-                  borderRadius: 8,
-                  border: "1px solid #d1d5db",
-                  background: "white",
-                  fontSize: 14,
-                  fontWeight: 600,
-                  cursor: "pointer",
-                }}
-              >
-                返回重新生成
-              </button>
-              <button
-                onClick={handleStitch}
-                disabled={stitching}
-                style={{
-                  padding: "12px 24px",
-                  borderRadius: 8,
-                  background: stitching ? "#9ca3af" : "#4f46e5",
-                  color: "white",
-                  border: 0,
-                  fontSize: 14,
-                  fontWeight: 600,
-                  cursor: stitching ? "not-allowed" : "pointer",
-                }}
-              >
-                {stitching ? "拼接中..." : "确认并拼接视频"}
-              </button>
-            </div>
-          )}
+          {clipResults.length === storyboards.length &&
+            clipResults.every((c) => c.status === "succeeded") && (
+              <div style={{ marginTop: 24, display: "flex", justifyContent: "flex-end", gap: 12 }}>
+                <button
+                  onClick={() => setStep("confirm")}
+                  style={{
+                    padding: "12px 24px",
+                    borderRadius: 8,
+                    border: "1px solid #d1d5db",
+                    background: "white",
+                    fontSize: 14,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  返回重新生成
+                </button>
+                <button
+                  onClick={handleStitch}
+                  disabled={stitching}
+                  style={{
+                    padding: "12px 24px",
+                    borderRadius: 8,
+                    background: stitching ? "#9ca3af" : "#4f46e5",
+                    color: "white",
+                    border: 0,
+                    fontSize: 14,
+                    fontWeight: 600,
+                    cursor: stitching ? "not-allowed" : "pointer",
+                  }}
+                >
+                  {stitching ? "拼接中..." : "确认并拼接视频"}
+                </button>
+              </div>
+            )}
         </div>
       )}
-      
+
       {/* 步骤5（旧版兼容）：生成结果 */}
       {step === "generating" && clipResults.length > 0 && storyboards.length === 0 && (
         <div style={{ background: "white", padding: 32, borderRadius: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
           <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 24 }}>步骤 5：镜头生成结果</h2>
-          
+
           {clipResults.map((clip) => (
             <div key={clip.idx} style={{ marginBottom: 20, padding: 16, border: "1px solid #e5e7eb", borderRadius: 8 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -1027,4 +1029,3 @@ export function WorkflowContent() {
     </div>
   );
 }
-

@@ -10,8 +10,9 @@ async function getJob(slug: string) {
   return await res.json();
 }
 
-export async function generateMetadata({ params }: { params: { slug: string } }): Promise<Metadata> {
-  const job = await getJob(params.slug);
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const { slug } = await params;
+  const job = await getJob(slug);
   if (!job) return { robots: { index: false, follow: false } };
   const title = `${job.slogan}｜AI 营销视频`;
   const description = `基于 ${job.slogan} 生成的营销视频与封面，可下载投放。`;
@@ -27,8 +28,9 @@ export async function generateMetadata({ params }: { params: { slug: string } })
   };
 }
 
-export default async function JobPage({ params }: { params: { slug: string } }) {
-  const job = await getJob(params.slug);
+export default async function JobPage({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const job = await getJob(slug);
   if (!job) {
     return (
       <main style={{ maxWidth: 880, margin: "0 auto", padding: 24 }}>
@@ -37,7 +39,7 @@ export default async function JobPage({ params }: { params: { slug: string } }) 
     );
   }
   const api = process.env.NEXT_PUBLIC_AGENT_URL;
-  const recs = api ? await fetch(`${api}/recommend/${params.slug}`, { next: { revalidate: 300 } }).then(r => r.ok ? r.json() : []) : [];
+  const recs = api ? await fetch(`${api}/recommend/${slug}`, { next: { revalidate: 300 } }).then(r => r.ok ? r.json() : []) : [];
   const jsonLd = {
     "@context": "https://schema.org",
     "@type": "VideoObject",
@@ -54,7 +56,7 @@ export default async function JobPage({ params }: { params: { slug: string } }) 
   return (
     <main style={{ maxWidth: 880, margin: "0 auto", padding: 24 }}>
       <h1 style={{ fontSize: 28, fontWeight: 700 }}>{job.slogan}</h1>
-      
+
       {/* 视频信息 */}
       {job.total_duration && (
         <div style={{ marginTop: 12, fontSize: 14, color: "#6b7280" }}>
