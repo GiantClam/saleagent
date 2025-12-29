@@ -49,7 +49,9 @@ from openrouter_client import OpenRouterClient
 from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Any, Tuple
 
-from crewai_workflow import build_crew
+# from crewai_workflow import build_crew
+from langgraph_workflow import start_video_generation, get_workflow_app
+from crewai_tools import plan_storyboard_impl, generate_video_clip_impl
 from crewai_tools import plan_storyboard_impl, generate_video_clip_impl
 from crewai_tools import synthesize_voice_impl, synthesize_bgm_impl
 # Import JobManager
@@ -526,21 +528,9 @@ class PlanResponse(BaseModel):
 async def workflow_plan(body: PlanRequest):
     logger.info(f"Planning storyboard for goal={body.goal} run_id={body.run_id}")
     
-    # 1. Generate Text Storyboard
-    storyboard_json = await plan_storyboard_impl(
-        goal=body.goal,
-        total_duration=body.total_duration,
-        styles=body.styles,
-        num_clips=body.num_clips,
-        run_id=body.run_id
-    )
-    
-    # Parse JSON
-    try:
-        data = json.loads(storyboard_json)
-    except:
-        logger.error(f"Failed to parse storyboard json: {storyboard_json}")
-        data = {"scenes": []}
+    # Replace CrewAI/Procedural logic with LangGraph
+    state = await start_video_generation(body.dict())
+    data = state.get("storyboard", {"scenes": []})
     
     scenes_data = []
     if isinstance(data, dict):
@@ -717,11 +707,34 @@ async def workflow_confirm(request: Request):
                  logger.warning(f"Failed to fetch job details for confirm: {e}")
         
         # Start background job
-        await job_manager.start_job(run_id, execute_video_generation_workflow(run_id, payload))
+        await job_manager.start_job(run_id, start_video_generation(payload))
         
         return {"status": "started", "run_id": run_id}
     except Exception as e:
         logger.error(f"Error in workflow_confirm: {e}")
+        return {"error": str(e)}
+
+@app.post("/workflow/update")
+async def workflow_update(request: Request):
+    """
+    Update the storyboard from the editor and trigger regeneration.
+    """
+    from langgraph_workflow import update_video_generation
+    try:
+        body = await request.json()
+        run_id = body.get("run_id")
+        thread_id = body.get("thread_id") or f"thread_{run_id}"
+        updates = body.get("updates", {})
+        
+        if not run_id:
+            return {"error": "Missing run_id"}
+            
+        # Update state and continue
+        await update_video_generation(run_id, thread_id, updates)
+        
+        return {"status": "updated", "run_id": run_id}
+    except Exception as e:
+        logger.error(f"Error in workflow_update: {e}")
         return {"error": str(e)}
 
 
@@ -2518,283 +2531,120 @@ async def crewai_chat(request: Request):
     # Define emit helper for SSE events
     async def emit(agent: str, event_type: str, run_id: str, thread_id: str, delta: str = "", payload: dict = None):
         """
-        Generate SSE event chunks
+        Generate chunks for useChat. 
+        0: text delta
+        2: data (metadata)
         """
-        event_data = {
-            "type": event_type,
-            "agent": agent,
-            "delta": delta,
-            "run_id": run_id,
-            "thread_id": thread_id
-        }
+        if delta:
+            yield f'0:{json.dumps(delta, ensure_ascii=False)}\n'
         if payload:
-            event_data["payload"] = payload
-        
-        # Format as SSE
-        event_json = json.dumps(event_data, ensure_ascii=False)
-        yield f"data: {event_json}\n\n"
+            # Wrap payload in a list for Vercel AI SDK data protocol
+            yield f'2:[{json.dumps(payload, ensure_ascii=False)}]\n'
     
     async def generator():
+        from langgraph_workflow import get_workflow_app
+        from langchain_core.messages import HumanMessage, AIMessage
+        
+        app = get_workflow_app()
+        config = {"configurable": {"thread_id": thread_id}}
+        
         try:
-            try:
-                from .creative_agent import (
-                    build_creative_agent_for_chat,
-                    generate_question_with_options,
-                    get_next_question,
-                )
-            except ImportError:
-                # 如果导入失败，使用内联实现
-                def generate_question_with_options(question_type: str, current_info: dict):
-                    VIDEO_TYPES = ["产品宣传视频", "品牌故事视频", "教程视频", "活动推广视频", "社交媒体短视频", "广告片", "产品演示视频", "其他"]
-                    DURATION_OPTIONS = [10, 20, 30, 60, 90, 120]
-                    STYLE_OPTIONS = ["现代简约", "科技感", "温馨生活", "时尚潮流", "商务专业", "创意艺术", "自然清新", "复古怀旧", "动感活力", "优雅高端"]
-                    CONSISTENCY_ELEMENTS = ["品牌Logo", "产品外观", "人物形象", "色彩方案", "字体样式", "包装设计", "用户界面", "场景背景"]
-                    
-                    if question_type == "video_type":
-                        return ("首先，请告诉我您想要制作什么类型的视频？", VIDEO_TYPES)
-                    elif question_type == "duration":
-                        return ("好的，您希望视频的时长是多少秒？", [f"{d}秒" for d in DURATION_OPTIONS])
-                    elif question_type == "style":
-                        return ("请选择视频的风格（可以选择多个）：", STYLE_OPTIONS)
-                    elif question_type == "product_image":
-                        return ("请上传产品图片（填写图片URL，或先上传文件获取URL）：", [])
-                    elif question_type == "theme":
-                        return ("请描述视频的主题或核心内容：", [])
-                    elif question_type == "keywords":
-                        return ("请提供一些关键词，这些关键词将帮助理解视频的核心信息（用逗号分隔）：", [])
-                    elif question_type == "key_elements":
-                        return ("请列出视频中需要重点展示的关键元素（用逗号分隔）：", [])
-                    elif question_type == "consistency_elements":
-                        return ("为了确保视频的一致性，请选择需要在所有场景中保持一致的元素（可以选择多个）：", CONSISTENCY_ELEMENTS)
-                    return ("", [])
-                
-                def get_next_question(current_info: dict):
-                    if "image_url" not in current_info or not str(current_info.get("image_url", "")).strip():
-                        return "product_image"
-                    if "theme" not in current_info:
-                        return "theme"
-                    if "video_type" not in current_info:
-                        return "video_type"
-                    if "duration" not in current_info:
-                        return "duration"
-                    if "styles" not in current_info or len(current_info.get("styles", [])) == 0:
-                        return "style"
-                    if "keywords" not in current_info or len(current_info.get("keywords", [])) == 0:
-                        return "keywords"
-                    if "key_elements" not in current_info or len(current_info.get("key_elements", [])) == 0:
-                        return "key_elements"
-                    if "consistency_elements" not in current_info or len(current_info.get("consistency_elements", [])) == 0:
-                        return "consistency_elements"
-                    return None
-                
-                def collect_video_info_tool(current_info: str, question_type: str, user_response: str = None):
-                    info = json.loads(current_info) if current_info else {}
-                    if user_response:
-                        if question_type == "video_type":
-                            info["video_type"] = user_response
-                        elif question_type == "duration":
-                            try:
-                                info["duration"] = float(user_response.replace("秒", ""))
-                            except:
-                                info["duration"] = 10.0
-                        elif question_type == "style":
-                            if "styles" not in info:
-                                info["styles"] = []
-                            if user_response not in info["styles"]:
-                                info["styles"].append(user_response)
-                        elif question_type == "product_image":
-                            info["image_url"] = user_response.strip()
-                        elif question_type == "theme":
-                            info["theme"] = user_response
-                        elif question_type == "keywords":
-                            if "keywords" not in info:
-                                info["keywords"] = []
-                            keywords = [k.strip() for k in user_response.split(",") if k.strip()]
-                            info["keywords"].extend(keywords)
-                        elif question_type == "key_elements":
-                            if "key_elements" not in info:
-                                info["key_elements"] = []
-                            elements = [e.strip() for e in user_response.split(",") if e.strip()]
-                            info["key_elements"].extend(elements)
-                        elif question_type == "consistency_elements":
-                            if "consistency_elements" not in info:
-                                info["consistency_elements"] = []
-                            elements = [e.strip() for e in user_response.split(",") if e.strip()]
-                            info["consistency_elements"].extend(elements)
-                    return json.dumps(info, ensure_ascii=False)
-            
-            # 注意：这里不再需要创建 agent 实例，因为对话逻辑是直接实现的
-            # 收集的信息会直接传递给后续的 build_crew 工作流
-            
-
             if action == "start":
-                # 预填充前端传递的初始信息
-                if "collected_info" not in conversation_state:
-                    conversation_state["collected_info"] = {}
+                initial_info = body.get("initial_info") or {}
+                # Start new workflow
+                inputs = {
+                    "goal": user_message or initial_info.get("theme") or "New Project",
+                    "styles": initial_info.get("styles", []),
+                    "total_duration": initial_info.get("total_duration", 10.0),
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "status": "gathering",
+                    "collected_info": initial_info,
+                    "messages": [HumanMessage(content=user_message)] if user_message else []
+                }
                 
-                # 图片
-                init_img = body.get("img") or body.get("image_url")
-                if init_img:
-                    conversation_state["collected_info"]["image_url"] = str(init_img).strip()
-                
-                # 主题 (前端将 theme 放在 message 字段中)
-                if user_message:
-                    conversation_state["collected_info"]["theme"] = str(user_message).strip()
-
-                # 开始对话
-                async for chunk in emit("System", "info", run_id, thread_id, 
-                                       delta="创意策划开始收集视频制作信息..."):
-                    yield chunk
-                
-                # 生成第一个问题
-                next_q = get_next_question(conversation_state["collected_info"])
-                
-                if next_q:
-                    question, options = generate_question_with_options(
-                        next_q, conversation_state["collected_info"]
-                    )
-                    conversation_state["current_question"] = next_q
-                    conversation_state["current_question_text"] = question
-                    conversation_state["current_options"] = options
-                    
-                    async for chunk in emit("创意策划", "question", run_id, thread_id,
-                                           delta=question,
-                                           payload={"options": options, "question_type": next_q}):
-                        yield chunk
-                
-                crewai_chat._conversation_states[state_key] = conversation_state
-                
-                # [FIX] Persist state to DB
+                # Persistence (Optional but good for tracking)
                 if supabase:
                     try:
-                        supabase.table("crew_sessions").update({
-                            "context": {
-                                "status": "planning",
-                                "collected_info": conversation_state.get("collected_info"),
-                                "current_question": conversation_state.get("current_question"),
-                                "current_question_text": conversation_state.get("current_question_text"),
-                                "current_options": conversation_state.get("current_options"),
-                                "question_history": conversation_state.get("question_history")
-                            },
+                        supabase.table("jobs").upsert({
+                            "run_id": run_id,
+                            "status": "gathering",
+                            "slogan": inputs["goal"],
+                            "created_at": datetime.utcnow().isoformat(),
                             "updated_at": datetime.utcnow().isoformat()
-                        }).eq("run_id", run_id).execute()
-                    except Exception as ex:
-                        logger.warning(f"[crewai-chat] Failed to persist state (start): {ex}")
-                
-            elif action == "message" and user_message:
-                # 处理用户回答
-                current_q = conversation_state.get("current_question")
-                if current_q:
-                    # 更新收集的信息（直接使用 Python 逻辑，不通过 Tool）
-                    info = conversation_state["collected_info"]
-                    if current_q == "video_type":
-                        info["video_type"] = user_message
-                    elif current_q == "duration":
-                        try:
-                            info["duration"] = float(user_message.replace("秒", "").strip())
-                        except:
-                            info["duration"] = 10.0
-                    elif current_q == "style":
-                        if "styles" not in info:
-                            info["styles"] = []
-                        if user_message not in info["styles"]:
-                            info["styles"].append(user_message)
-                    elif current_q == "product_image":
-                        info["image_url"] = user_message.strip()
-                    elif current_q == "theme":
-                        info["theme"] = user_message
-                    elif current_q == "keywords":
-                        if "keywords" not in info:
-                            info["keywords"] = []
-                        keywords = [k.strip() for k in user_message.split(",") if k.strip()]
-                        info["keywords"].extend(keywords)
-                    elif current_q == "key_elements":
-                        if "key_elements" not in info:
-                            info["key_elements"] = []
-                        elements = [e.strip() for e in user_message.split(",") if e.strip()]
-                        info["key_elements"].extend(elements)
-                    elif current_q == "consistency_elements":
-                        if "consistency_elements" not in info:
-                            info["consistency_elements"] = []
-                        elements = [e.strip() for e in user_message.split(",") if e.strip()]
-                        info["consistency_elements"].extend(elements)
-                    
-                    conversation_state["collected_info"] = info
-                    conversation_state["question_history"].append({
-                        "question": current_q,
-                        "question_text": conversation_state.get("current_question_text", ""),
-                        "options": conversation_state.get("current_options", []),
-                        "answer": user_message
-                    })
-                
-                # 检查是否所有信息已收集完成
-                next_q = get_next_question(conversation_state["collected_info"])
-                
-                if next_q:
-                    # 还有问题要问
-                    question, options = generate_question_with_options(
-                        next_q, conversation_state["collected_info"]
-                    )
-                    conversation_state["current_question"] = next_q
-                    conversation_state["current_question_text"] = question
-                    conversation_state["current_options"] = options
-                    
-                    async for chunk in emit("创意策划", "question", run_id, thread_id,
-                                           delta=question,
-                                           payload={"options": options, "question_type": next_q}):
-                        yield chunk
-                else:
-                    # 所有信息已收集完成
-                    # 1. 保存最终结果到 Supabase
-                    if supabase:
-                        try:
-                            # 再次更新，确保所有收集的信息都保存了
-                            collected = conversation_state["collected_info"]
-                            supabase.table("jobs").upsert({
-                                "run_id": run_id,
-                                "status": "planning", 
-                                "slogan": collected.get("theme") or collected.get("video_type"),
-                                "styles": collected.get("styles"),
-                                "total_duration": float(collected.get("duration", 10.0)),
-                                "image_control": bool(collected.get("image_url")), # 只有存在 image_url 才启用图控
-                                "cover_url": collected.get("image_url"), # 图片存储在 cover_url
-                                "updated_at": datetime.utcnow().isoformat()
-                            }, on_conflict="run_id").execute()
-                        except Exception as e:
-                            logger.error(f"[crewai-chat] Failed to save final state: {e}")
+                        }, on_conflict="run_id").execute()
+                    except: pass
 
-                    # 2. 发送完成事件
-                    async for chunk in emit("System", "collected", run_id, thread_id,
-                                           delta="信息收集完成！请确认生成方案。",
-                                           payload=conversation_state["collected_info"]):
-                        yield chunk
-                    
-                    # 3. 结束流
-                    return
-                
-                crewai_chat._conversation_states[state_key] = conversation_state
+                async for chunk in app.astream(inputs, config, stream_mode="values"):
+                    if "messages" in chunk and chunk["messages"]:
+                        last_msg = chunk["messages"][-1]
+                        if isinstance(last_msg, AIMessage):
+                            # Emit question with options
+                            payload = {
+                                "options": chunk.get("options", []),
+                                "next_question": chunk.get("next_question"),
+                                "collected_info": chunk.get("collected_info")
+                            }
+                            # Sync state to DB for UI restoration
+                            if supabase:
+                                try:
+                                    new_messages = chunk.get("messages", [])
+                                    serializable_messages = [{"role": "user" if m.type == "human" else "assistant", "content": m.content} for m in new_messages]
+                                    supabase.table("crew_sessions").upsert({
+                                        "run_id": run_id,
+                                        "status": chunk.get("status") or "gathering",
+                                        "context": {
+                                            "messages": serializable_messages,
+                                            "collected_info": chunk.get("collected_info"),
+                                            "storyboard": chunk.get("storyboard")
+                                        },
+                                        "updated_at": datetime.utcnow().isoformat()
+                                    }, on_conflict="run_id").execute()
+                                except Exception as e:
+                                    logger.warning(f"Failed to persist state: {e}")
 
-                # [FIX] Persist state to DB
-                if supabase:
-                    try:
-                        supabase.table("crew_sessions").update({
-                            "context": {
-                                "status": "planning",
-                                "collected_info": conversation_state.get("collected_info"),
-                                "current_question": conversation_state.get("current_question"),
-                                "current_question_text": conversation_state.get("current_question_text"),
-                                "current_options": conversation_state.get("current_options"),
-                                "question_history": conversation_state.get("question_history")
-                            },
-                            "updated_at": datetime.utcnow().isoformat()
-                        }).eq("run_id", run_id).execute()
-                    except Exception as ex:
-                        logger.warning(f"[crewai-chat] Failed to persist state (message): {ex}")
-            
+                            async for sse in emit("创意策划", "question", run_id, thread_id, delta=last_msg.content, payload=payload):
+                                yield sse
+            else:
+                # Continue with user response
+                await app.aupdate_state(config, {"messages": [HumanMessage(content=user_message)]})
+                async for chunk in app.astream(None, config, stream_mode="values"):
+                     if "messages" in chunk and chunk["messages"]:
+                        last_msg = chunk["messages"][-1]
+                        if isinstance(last_msg, AIMessage):
+                            payload = {
+                                "options": chunk.get("options", []),
+                                "next_question": chunk.get("next_question"),
+                                "collected_info": chunk.get("collected_info")
+                            }
+                            # Sync state to DB for UI restoration
+                            if supabase:
+                                try:
+                                    new_messages = chunk.get("messages", [])
+                                    serializable_messages = [{"role": "user" if m.type == "human" else "assistant", "content": m.content} for m in new_messages]
+                                    supabase.table("crew_sessions").upsert({
+                                        "run_id": run_id,
+                                        "status": chunk.get("status") or "gathering",
+                                        "context": {
+                                            "messages": serializable_messages,
+                                            "collected_info": chunk.get("collected_info"),
+                                            "storyboard": chunk.get("storyboard")
+                                        },
+                                        "updated_at": datetime.utcnow().isoformat()
+                                    }, on_conflict="run_id").execute()
+                                except Exception as e:
+                                    logger.warning(f"Failed to persist state: {e}")
+
+                            async for sse in emit("创意策划", "question", run_id, thread_id, delta=last_msg.content, payload=payload):
+                                yield sse
+                     
+                     # Check if we transitioned to planning (storyboard ready)
+                     if chunk.get("status") == "awaiting_approval" and "storyboard" in chunk:
+                         async for sse in emit("System", "collected", run_id, thread_id, delta="计划生成完成", payload=chunk["storyboard"]):
+                             yield sse
         except Exception as e:
-            logger.error(f"[crewai-chat] Error: {e}", exc_info=True)
-            async for chunk in emit("System", "error", run_id, thread_id,
-                                   delta=f"❌ 错误：{str(e)}"):
+            logger.error(f"Error in crewai_chat generator: {e}", exc_info=True)
+            async for chunk in emit("System", "error", run_id, thread_id, delta=str(e)):
                 yield chunk
     
     return StreamingResponse(generator(), media_type="text/event-stream")
@@ -3070,7 +2920,8 @@ async def upload_presign(body: UploadPresignRequest):
         return res
     except Exception as e:
         logger.error(f"[upload_presign] Failed: {e}")
-        return {"error": str(e)}
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # [NEW] Scene Regenerate Endpoint

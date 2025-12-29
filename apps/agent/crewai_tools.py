@@ -481,10 +481,27 @@ import logging
 logger = logging.getLogger("crewai_tools")
 
 
-async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: float, num_clips: int, run_id: str = None) -> str:
+async def plan_storyboard_impl(
+    goal: str, 
+    styles: List[str], 
+    total_duration: float, 
+    num_clips: int, 
+    run_id: str = None,
+    collected_info: Optional[Dict[str, Any]] = None
+) -> str:
     """依据目标/风格/时长生成分镜脚本草案，返回 JSON 字符串。异步版本。"""
     if not (OPENROUTER_BASE and OPENROUTER_KEY):
         raise RuntimeError("未配置 OpenRouter（OPENROUTER_API_BASE / OPENROUTER_API_KEY）")
+    
+    # Use collected_info if available to enhance the goal
+    enhanced_context = f"视频目标: {goal}\n风格: {', '.join(styles)}\n"
+    if collected_info:
+        enhanced_context += f"视频类型: {collected_info.get('video_type', 'N/A')}\n"
+        enhanced_context += f"主题: {collected_info.get('theme', 'N/A')}\n"
+        enhanced_context += f"字幕要求: {collected_info.get('subtitles', '标准')}\n"
+        enhanced_context += f"人声要求: {collected_info.get('voice_over', '专业男声')}\n"
+        enhanced_context += f"背景音乐: {collected_info.get('bgm', '动感')}\n"
+        enhanced_context += f"关键元素: {', '.join(collected_info.get('key_elements', []))}\n"
     
     or_client = OpenRouterClient(
         api_base=OPENROUTER_BASE,
@@ -498,55 +515,12 @@ async def plan_storyboard_impl(goal: str, styles: List[str], total_duration: flo
     # 计算需要多少个 scene（每个 scene 10s）
     num_scenes = max(1, int(total_duration / 10.0) + (1 if total_duration % 10.0 > 0 else 0))
     
-    # 要求输出严格的 JSON 对象（包含 scenes 数组），弱化镜头文本描述，强调场景连贯与参考图驱动
-    # 【关键】由于 director_agent 不启用 reasoning，这里在 prompt 中强调“简短概要”和“单镜头覆盖”
     sys_prompt = (
-        "你是资深广告导演。根据用户目标与风格，将视频拆分为场景（scene）。弱化文字提示，尽量让模型依据参考图生成画面。\n\n"
+        "你是资深广告导演。根据用户提供的视频要素，将视频拆分为场景（scene）。\n\n"
+        "【关键：视觉一致性】\n"
+        "对于每个场景，必须生成一个 visual_anchor（画面核心锚点描述，例如：‘一个戴着墨镜的潮流女孩在霓虹灯下行走’）。该锚点描述必须包含在该场景的所有 clip 描述中，确保画面主体的连贯性。\n\n"
         "【重要】结构要求：\n"
         "1. 视频由多个场景（scene）组成，每个场景时长恰好为10秒\n"
-        "2. 每个场景仅需一个镜头（clip）覆盖整个10秒，begin_s=0.0, end_s=10.0\n"
-        "3. clip 的 desc 为一句话概要（尽量简短），避免冗长提示词\n"
-        "4. 场景总时长必须恰好为10秒，保持相邻场景视觉连贯\n\n"
-        "【关键】场景转场衔接要求：\n"
-        "1. 每个场景的结尾画面应该自然过渡到下一个场景的开头画面\n"
-        "2. 考虑场景之间的视觉连贯性，使用相似的色调、构图或元素进行衔接\n"
-        "3. 在场景描述中考虑转场方式（淡入淡出、交叉溶解、硬切等），确保视觉流畅\n"
-        "4. 相邻场景之间应该有逻辑关联，避免突兀的跳跃\n\n"
-        "【关键】文案与语音参数要求：\n"
-        "1. 每个场景可包含简短 narration（一句话概要，10-20字），覆盖整体意图即可\n"
-        "2. 文案应与画面内容匹配，避免过度提示\n"
-        "3. 确保文案的完整性，不要截断或省略关键信息\n"
-        "4. 文案应该与场景内的镜头内容同步，描述画面中正在发生的事情\n"
-        "5. 文案应该具有连贯性，相邻场景的文案应该自然衔接\n\n"
-        "【新增】每个场景必须包含语音参数 voice_params：emotion（happy/sad/angry/calm 等）、speed（0.5-2.0）、vol（0.5-2.0）、pitch（-12 至 12），用于旁白合成。\n\n"
-        "【关键】输出格式要求（必须严格遵守，这是最重要的）：\n"
-        "1. 严格只输出 JSON 对象，不要任何额外文字、说明、Markdown 代码块、注释或思考过程\n"
-        "2. 不要输出任何 reasoning 或思考过程，直接输出 JSON\n"
-        "3. JSON 结构必须为：{\"scenes\": [{\"scene_idx\": 1, \"narration\": \"一句话概要（简短即可）\", \"voice_params\": {\"emotion\": \"calm\", \"speed\": 1.0, \"vol\": 1.0, \"pitch\": 0}, \"clips\": [{\"idx\": 1, \"desc\": \"简短概要\", \"begin_s\": 0.0, \"end_s\": 10.0}], \"begin_s\": 0.0, \"end_s\": 10.0}, ...]}\n"
-        "4. 每个 scene 必须包含 scene_idx, narration, clips, begin_s, end_s 字段\n"
-        "5. narration 字段：一句话概要，覆盖整体意图，与画面内容匹配\n"
-        "6. voice_params 字段：包含 emotion/speed/vol/pitch，用于旁白合成；默认 emotion=calm, speed=1.0, vol=1.0, pitch=0\n"
-        "7. 每个 clip 必须包含 idx, desc, begin_s, end_s 字段，且唯一镜头覆盖整个场景（0-10s）\n"
-        "8. scene 的 begin_s 和 end_s 必须恰好相差 10.0 秒\n"
-        "9. scene 内的 clips 时间必须连续，且覆盖整个 scene 的时长\n"
-        "10. desc 为一句中文概要（尽量简短），不含编号/时间/标题/Markdown 符号\n"
-        "11. 不要输出 keyframes，这些由后续工具生成\n"
-        "11. 【最重要】直接输出 JSON，不要任何前缀、后缀或说明文字\n\n"
-        "【正确示例】（必须完全按照此格式）：\n"
-        "{\n"
-        "  \"scenes\": [\n"
-        "    {\n"
-        "      \"scene_idx\": 1,\n"
-        "      \"begin_s\": 0.0,\n"
-        "      \"end_s\": 10.0,\n"
-        "      \"clips\": [\n"
-        "        {\"idx\": 1, \"desc\": \"特写iPhone 17摄像头模组，金属边框反射冷冽蓝光，背景纯黑，镜头缓慢推进\", \"begin_s\": 0.0, \"end_s\": 3.0},\n"
-        "        {\"idx\": 2, \"desc\": \"中景悬浮的iPhone 17完整机身，钛金属边框流转霓虹光效\", \"begin_s\": 3.0, \"end_s\": 7.0},\n"
-        "        {\"idx\": 3, \"desc\": \"手机360度旋转展示，突出轻薄设计\", \"begin_s\": 7.0, \"end_s\": 10.0}\n"
-        "      ]\n"
-        "    },\n"
-        "    {\n"
-        "      \"scene_idx\": 2,\n"
         "      \"begin_s\": 10.0,\n"
         "      \"end_s\": 20.0,\n"
         "      \"clips\": [...]\n"

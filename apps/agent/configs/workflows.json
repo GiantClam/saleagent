@@ -1,0 +1,38 @@
+{
+    "runninghub": {
+        "base_url": "https://www.runninghub.cn",
+        "workflows": {
+            "sora2": {
+                "workflow_id": "1985261217524629506",
+                "nodes": {
+                    "prompt": {
+                        "nodeId": "41",
+                        "fieldName": "prompt"
+                    },
+                    "image": {
+                        "nodeId": "40",
+                        "fieldName": "image"
+                    }
+                }
+            }
+        }
+    },
+    "liblib": {
+        "base_url": "https://www.liblib.art",
+        "workflows": {
+            "standard": {
+                "workflow_id": "FILL_YOUR_LIBLIB_WORKFLOW_ID_HERE",
+                "nodes": {
+                    "prompt": {
+                        "nodeId": "...",
+                        "fieldName": "..."
+                    },
+                    "image": {
+                        "nodeId": "...",
+                        "fieldName": "..."
+                    }
+                }
+            }
+        }
+    }
+}

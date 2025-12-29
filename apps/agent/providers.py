@@ -47,28 +47,57 @@ def get_image_provider() -> ImageProvider:
     raise ValueError(f"不支持的图片 Provider: {provider}")
 
 
+from generators.token_engine import TokenEngineGenerator
+from generators.comfyui import ComfyUIGenerator
+from generators.fallback import MultiGenerator
+import json
+
+def _load_workflow_config():
+    config_path = os.path.join(os.path.dirname(__file__), "configs", "workflows.json")
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            return json.load(f)
+    return {}
+
 def get_video_provider() -> VideoProvider:
-    """选择视频 Provider，默认 pixverse；支持 mock；初始化失败则回退 mock。"""
-    provider = (os.getenv("PROVIDER_VIDEO") or "pixverse").lower()
-    logger = logging.getLogger("workflow")
-    if provider == "mock":
-        logger.info("[providers] Using MockVideoProvider")
+    """
+    Returns a MultiGenerator configured with prioritized video providers.
+    """
+    provider_env = (os.getenv("PROVIDER_VIDEO") or "runninghub").lower()
+    
+    if provider_env == "mock":
         return MockVideoProvider()
-    try:
-        if provider == "pixverse":
-            from providers_video_pixverse import PixVerseVideoProvider
-            return PixVerseVideoProvider()
-        elif provider == "runninghub":
-            from providers_video_runninghub import RunningHubVideoProvider
-            return RunningHubVideoProvider()
-        elif provider == "sora2":
-            from providers_video_runninghub_sora2 import RunningHubSora2VideoProvider
-            return RunningHubSora2VideoProvider()
-        elif provider in {"veo3.1", "hailuo"}:
-            raise ValueError(f"Provider {provider} 尚未实现")
-        raise ValueError(f"不支持的视频 Provider: {provider}")
-    except Exception as e:
-        logger.warning(f"[providers] Video provider '{provider}' init failed: {e}; fallback to mock")
+        
+    config = _load_workflow_config()
+    generators = []
+    
+    # Primary: RunningHub
+    rh_key = os.getenv("RUNNINGHUB_API_KEY")
+    rh_workflow = config.get("runninghub", {}).get("workflows", {}).get("sora2")
+    if rh_key and rh_workflow:
+        generators.append(ComfyUIGenerator(
+            "RunningHub", rh_key, rh_workflow["workflow_id"], 
+            rh_workflow["nodes"], config["runninghub"]["base_url"]
+        ))
+        
+    # Backup 1: Liblib.art
+    ll_key = os.getenv("LIBLIB_API_KEY")
+    ll_workflow = config.get("liblib", {}).get("workflows", {}).get("standard")
+    if ll_key and ll_workflow:
+        generators.append(ComfyUIGenerator(
+            "Liblib", ll_key, ll_workflow["workflow_id"], 
+            ll_workflow["nodes"], config["liblib"]["base_url"]
+        ))
+        
+    # Backup 2: Token Engine (Sora2)
+    te_key = os.getenv("SORA2_TOKEN_ENGINE_KEY")
+    if te_key:
+        generators.append(TokenEngineGenerator(te_key))
+        
+    if not generators:
+        logger.warning("[providers] No video generators configured, using Mock")
         return MockVideoProvider()
+        
+    return MultiGenerator(generators)
 
 
